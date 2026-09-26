@@ -1,0 +1,88 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+.metadata
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Local editor and AI coding assistant configuration
+.vscode/
+opencode.json
+/devtools_options.yaml
+/.git-history-backup/
+
+# Local planning notes and project documentation that are not part of the app
+/CONTEXT.md
+/TO ADD.md
+/docs/
+/screenshots/
+
+# User-requested files and platform folders to keep out of the GitHub repository
+/README.md
+/windows/
+/web/
+/tooling/
+/test/
+/supabase/config.toml
+/supabase/templates/
+/supabase/migrations/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+**/local.properties
+
+# Vendor runtime fork only; its demo and tests are not app dependencies
+/third_party/camera_android/example/
+/third_party/camera_android/test/
+/third_party/camera_android/android/src/test/
+
+# Firebase
+/android/app/google-services.json
+/ios/Runner/GoogleService-Info.plist
+/functions/node_modules/
+/functions/.env
+/functions/.env.*
+!/functions/.env.example
+/functions/.secret.local
+
+# Signing
+/android/key.properties
+/android/app/upload-keystore.jks
+
+# Whisper/VAD models — downloaded at first voice use, not bundled
+/assets/models/
+
+# Downloaded source CSV; the compressed, generated catalog is tracked instead.
+/tooling/ph_fda_drug_products.csv

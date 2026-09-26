@@ -1,0 +1,442 @@
+import 'dart:async';
+
+import 'package:app_links/app_links.dart';
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:provider/provider.dart';
+import 'theme/app_theme.dart';
+import 'models/accessibility_mode.dart';
+import 'screens/dashboard_screen.dart';
+import 'screens/mediscan_screen.dart';
+import 'screens/medischedule_screen.dart';
+import 'screens/medication_detail_screen.dart';
+import 'screens/guardian_screen.dart';
+import 'screens/settings_screen.dart';
+import 'screens/auth_screen.dart';
+import 'screens/profile_screen.dart';
+import 'screens/onboarding_setup_screen.dart';
+import 'screens/alarm_alert_screen.dart';
+import 'screens/legal_document_screen.dart';
+import 'screens/payment_success_screen.dart';
+import 'screens/password_recovery_screen.dart';
+import 'screens/user_manual_screen.dart';
+import 'providers/voice_navigation_provider.dart';
+import 'providers/tts_provider.dart';
+import 'providers/app_state_provider.dart';
+import 'providers/auth_provider.dart';
+import 'providers/notification_provider.dart';
+import 'providers/medication_provider.dart';
+import 'services/supabase_sync_service.dart';
+import 'services/supabase_service.dart';
+
+class MediSenseApp extends StatefulWidget {
+  const MediSenseApp({super.key});
+
+  @override
+  State<MediSenseApp> createState() => _MediSenseAppState();
+}
+
+class _MediSenseAppState extends State<MediSenseApp>
+    with WidgetsBindingObserver {
+  late final GoRouter _router;
+  late final AppLinks _appLinks;
+  late final Future<void> _deepLinkReady;
+  StreamSubscription<Uri>? _deepLinkSubscription;
+  Future<void>? _wakeWordModelInitialization;
+  bool _paymentDeepLinkReceived = false;
+  bool _pairingDeepLinkReceived = false;
+  bool _emailConfirmationLinkReceived = false;
+  bool _passwordRecoveryLinkReceived = false;
+  String? _lastRecoveryLink;
+  AppStateProvider? _appStateProvider;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
+    // Apply the persisted TTS speed and pitch once at startup (the sliders
+    // otherwise only take effect after they are moved).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final tts = context.read<TtsProvider>();
+      final appState = context.read<AppStateProvider>();
+      tts.setSpeechRate(appState.ttsSpeed);
+      tts.setPitch(appState.ttsPitch);
+      tts.setVolume(appState.ttsVolume);
+    });
+
+    _router = GoRouter(
+      initialLocation: context.read<AppStateProvider>().onboardingSeen
+          ? '/'
+          : '/onboarding',
+      routes: [
+        GoRoute(
+          path: '/auth',
+          builder: (context, state) => AuthScreen(
+            emailConfirmed:
+                state.uri.queryParameters['emailConfirmed'] == 'true',
+            pairingId: state.uri.queryParameters['pairingId'],
+          ),
+        ),
+        GoRoute(
+          path: '/reset-password',
+          builder: (context, state) => PasswordRecoveryScreen(
+            status: state.uri.queryParameters['status'] ?? 'invalid',
+          ),
+        ),
+        GoRoute(
+          path: '/profile',
+          builder: (context, state) => const ProfileScreen(),
+        ),
+        GoRoute(
+          path: '/accessibility-choice',
+          builder: (context, state) => const OnboardingSetupScreen(),
+        ),
+        GoRoute(
+          path: '/onboarding',
+          builder: (context, state) => const OnboardingSetupScreen(),
+        ),
+        GoRoute(
+          path: '/',
+          builder: (context, state) => const DashboardScreen(),
+        ),
+        GoRoute(
+          path: '/scan',
+          builder: (context, state) => const MediScanScreen(),
+        ),
+        GoRoute(
+          path: '/schedule',
+          builder: (context, state) => const MediScheduleScreen(),
+        ),
+        GoRoute(
+          path: '/medication/:id',
+          builder: (context, state) {
+            final id = state.pathParameters['id']!;
+            return MedicationDetailScreen(medicationId: id);
+          },
+        ),
+        GoRoute(
+          path: '/guardian',
+          builder: (context, state) => const GuardianScreen(),
+        ),
+        GoRoute(
+          path: '/settings',
+          builder: (context, state) => const SettingsScreen(),
+        ),
+        GoRoute(
+          path: '/user-manual',
+          builder: (context, state) => const UserManualScreen(),
+        ),
+        GoRoute(
+          path: '/terms',
+          builder: (context, state) =>
+              const LegalDocumentScreen(type: LegalDocumentType.terms),
+        ),
+        GoRoute(
+          path: '/privacy',
+          builder: (context, state) =>
+              const LegalDocumentScreen(type: LegalDocumentType.privacy),
+        ),
+        GoRoute(
+          path: '/payment-success',
+          builder: (context, state) => const PaymentSuccessScreen(),
+        ),
+        GoRoute(
+          path: '/alarm',
+          builder: (context, state) {
+            final extra = state.extra is Map
+                ? state.extra as Map
+                : const <String, dynamic>{};
+            return AlarmAlertScreen(
+              medicationId: extra['medicationId'] as String? ?? '',
+              scheduleId: extra['scheduleId'] as String? ?? '',
+            );
+          },
+        ),
+      ],
+    );
+
+    _router.routerDelegate.addListener(_onRouteChanged);
+    _deepLinkReady = _setupDeepLinks();
+    unawaited(_deepLinkReady);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      // Wait until the initial link has been checked before restoring the
+      // previous route. Otherwise a cold-start payment callback can be
+      // immediately replaced by the saved route.
+      await _deepLinkReady;
+      if (!mounted) return;
+      final voiceProvider = context.read<VoiceNavigationProvider>();
+      final ttsProvider = context.read<TtsProvider>();
+      final appState = context.read<AppStateProvider>();
+      final auth = context.read<AuthProvider>();
+      final notifProvider = context.read<NotificationProvider>();
+      final medProvider = context.read<MedicationProvider>();
+      voiceProvider.setRouter(_router);
+      voiceProvider.setTtsProvider(ttsProvider);
+      voiceProvider.setAppStateProvider(appState);
+      notifProvider.setRouter(_router);
+      notifProvider.setMedicationProvider(medProvider);
+      notifProvider.setTtsProvider(ttsProvider);
+      await notifProvider.resolvePendingAction();
+
+      // SharedPreferences can remember a local app login after Supabase has
+      // no session. Do not restore that identity as an authenticated account.
+      if (SupabaseService.isConfigured &&
+          SupabaseService.client.auth.currentUser?.id != appState.savedUserId) {
+        await appState.clearAuthSession();
+      }
+
+      if (appState.savedUserId != null && appState.savedUserEmail != null) {
+        final syncService = SupabaseSyncService();
+        final profile = await syncService.getUserProfile(appState.savedUserId!);
+        final profileRole = profile?['role'] as String?;
+        final restoredRole =
+            profileRole == 'guardian' || profileRole == 'patient'
+            ? profileRole!
+            : appState.savedRole ?? 'patient';
+        auth.login(
+          appState.savedUserId!,
+          appState.savedUserName ?? 'User',
+          appState.savedUserEmail!,
+          tier: appState.savedTier ?? 'Free',
+          role: restoredRole,
+        );
+        final profileData = profile;
+        if (profileData != null) {
+          final expiry = profileData['subscription_expires_at'];
+          final expiryDate = expiry is DateTime
+              ? expiry
+              : DateTime.tryParse(expiry?.toString() ?? '');
+          final active =
+              profileData['subscription_status'] == 'active' &&
+              expiryDate != null &&
+              expiryDate.isAfter(DateTime.now());
+          final restoredTier = active
+              ? (profileData['tier'] as String? ?? 'Free')
+              : 'Free';
+          auth.updateTier(restoredTier);
+          await appState.saveAuthSession(
+            auth.userId,
+            auth.userName,
+            auth.userEmail,
+            restoredTier,
+            role: auth.role.name,
+          );
+        }
+        await syncService.uploadUserProfile(
+          userId: auth.userId,
+          email: auth.userEmail,
+          name: auth.userName,
+          role: auth.role,
+          tier: auth.tier,
+        );
+      }
+
+      if (!mounted) return;
+      if (!_paymentDeepLinkReceived &&
+          !_pairingDeepLinkReceived &&
+          !_emailConfirmationLinkReceived &&
+          !_passwordRecoveryLinkReceived) {
+        if (appState.onboardingSeen) {
+          final savedRoute = appState.lastRoute;
+          if (savedRoute != null && savedRoute.isNotEmpty) {
+            _router.go(savedRoute);
+          }
+        } else {
+          _router.go('/onboarding');
+        }
+      }
+      if (appState.onboardingSeen) {
+        _syncVoiceNavigationMode();
+      }
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final nextAppState = context.read<AppStateProvider>();
+    if (_appStateProvider == nextAppState) return;
+
+    _appStateProvider?.removeListener(_syncVoiceNavigationMode);
+    _appStateProvider = nextAppState;
+    _appStateProvider?.addListener(_syncVoiceNavigationMode);
+  }
+
+  @override
+  void dispose() {
+    unawaited(_deepLinkSubscription?.cancel() ?? Future<void>.value());
+    _appStateProvider?.removeListener(_syncVoiceNavigationMode);
+    _router.routerDelegate.removeListener(_onRouteChanged);
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  Future<void> _setupDeepLinks() async {
+    _appLinks = AppLinks();
+
+    final initialLink = await _appLinks.getInitialLink();
+    if (initialLink != null) {
+      _handleDeepLink(initialLink);
+    }
+
+    _deepLinkSubscription = _appLinks.uriLinkStream.listen(_handleDeepLink);
+  }
+
+  void _handleDeepLink(Uri uri) {
+    if (uri.scheme == 'medisense' &&
+        uri.host == 'pairing' &&
+        uri.path == '/invitation') {
+      _pairingDeepLinkReceived = true;
+      final pairingId = uri.queryParameters['pairing_id']?.trim();
+      if (pairingId == null || pairingId.isEmpty) return;
+      unawaited(
+        context.read<AppStateProvider>().setPendingPairingId(pairingId),
+      );
+      final signedIn =
+          SupabaseService.isConfigured &&
+          SupabaseService.client.auth.currentUser != null;
+      if (mounted) {
+        _router.go(
+          signedIn
+              ? '/guardian?pairingId=${Uri.encodeQueryComponent(pairingId)}'
+              : '/auth?pairingId=${Uri.encodeQueryComponent(pairingId)}',
+        );
+      }
+      return;
+    }
+    if (uri.scheme == 'medisense' &&
+        uri.host == 'auth' &&
+        uri.path == '/recovery') {
+      final link = uri.toString();
+      if (_lastRecoveryLink == link) return;
+      _lastRecoveryLink = link;
+      _passwordRecoveryLinkReceived = true;
+      _router.go('/reset-password?status=checking');
+      unawaited(_openRecoveryLink(uri));
+      return;
+    }
+    if (uri.scheme == 'medisense' &&
+        uri.host == 'auth' &&
+        uri.path == '/callback') {
+      _emailConfirmationLinkReceived = true;
+      if (mounted) _router.go('/auth?emailConfirmed=true');
+      return;
+    }
+    if (uri.scheme == 'medisense' &&
+        uri.host == 'payment' &&
+        uri.path == '/success') {
+      _paymentDeepLinkReceived = true;
+      if (!mounted) return;
+      _router.go('/payment-success');
+    }
+  }
+
+  Future<void> _openRecoveryLink(Uri uri) async {
+    try {
+      if (!SupabaseService.isConfigured) throw StateError('Auth unavailable');
+      final result = await SupabaseService.client.auth.getSessionFromUrl(uri);
+      if (!mounted || result.session.user.id.isEmpty) return;
+      _router.go('/reset-password?status=ready');
+    } catch (error) {
+      debugPrint('Password recovery link could not be opened: $error');
+      if (mounted) _router.go('/reset-password?status=invalid');
+    }
+  }
+
+  void _syncVoiceNavigationMode() {
+    if (!mounted) return;
+    final appState = context.read<AppStateProvider>();
+    final voiceProvider = context.read<VoiceNavigationProvider>();
+    final shouldUseVoiceNavigation = appState.voiceNavigationEnabled;
+
+    voiceProvider.setPushToTalkMode(shouldUseVoiceNavigation);
+    if (shouldUseVoiceNavigation) {
+      _initializeInstalledWakeWordModel(voiceProvider);
+    }
+  }
+
+  void _initializeInstalledWakeWordModel(VoiceNavigationProvider voice) {
+    if (voice.isVoskInitialized || _wakeWordModelInitialization != null) {
+      return;
+    }
+    final initialization = () async {
+      try {
+        // Wake-word recognition must be armed before the user taps the mic.
+        // Only load an existing model here; the mic flow remains responsible
+        // for presenting the download and storage prompts on first use.
+        final modelPath = await voice.voskModelStore.installedModelPath();
+        if (!mounted ||
+            modelPath == null ||
+            !context.read<AppStateProvider>().voiceNavigationEnabled) {
+          return;
+        }
+        await voice.initializeVosk(modelPath);
+      } catch (error, stackTrace) {
+        debugPrint(
+          'Wake-word listener could not initialize: $error\n$stackTrace',
+        );
+      }
+    }();
+    _wakeWordModelInitialization = initialization;
+    unawaited(
+      initialization.whenComplete(() {
+        if (identical(_wakeWordModelInitialization, initialization)) {
+          _wakeWordModelInitialization = null;
+        }
+      }),
+    );
+  }
+
+  void _onRouteChanged() {
+    try {
+      final location = _router.routerDelegate.currentConfiguration.uri
+          .toString();
+      if (location.startsWith('/reset-password')) return;
+      if (location.isNotEmpty) {
+        final appState = context.read<AppStateProvider>();
+        appState.saveLastRoute(location);
+      }
+    } catch (_) {}
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      try {
+        final appState = context.read<AppStateProvider>();
+        final location = _router.routerDelegate.currentConfiguration.uri.path;
+        if (location.isNotEmpty) {
+          appState.saveLastRoute(location);
+        }
+      } catch (_) {}
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final appState = context.watch<AppStateProvider>();
+    final isVisionLoss = appState.accessibilityMode.isVisionLoss;
+    final isElder = appState.accessibilityMode.isElder;
+    final usesElderTheme = isElder || isVisionLoss;
+    Widget app = MaterialApp.router(
+      title: 'MediSense',
+      debugShowCheckedModeBanner: false,
+      theme: usesElderTheme ? AppTheme.elderLightTheme : AppTheme.lightTheme,
+      darkTheme: usesElderTheme ? AppTheme.elderDarkTheme : AppTheme.darkTheme,
+      themeMode: appState.darkMode ? ThemeMode.dark : ThemeMode.light,
+      routerConfig: _router,
+      // The capsule navigation owns the optional centered microphone. This
+      // keeps it out of Settings and prevents it from covering form controls.
+      builder: (context, child) => child!,
+    );
+
+    // ponytail: no extra textScaler for elder mode — the elder themes are
+    // already sized up; scaling them again (old 1.35x) overflowed every card.
+    return app;
+  }
+}
