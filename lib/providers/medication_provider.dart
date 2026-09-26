@@ -165,7 +165,7 @@ class MedicationProvider extends ChangeNotifier {
           frequency:
               (first['med_frequency'] as String?) ??
               Medication.frequencyForSchedule(scheduleItems),
-          expirationDate: _parseDate(expDate),
+          expirationDate: _parseDateOrNull(expDate),
           quantityDispensed: first['med_quantity_dispensed'] as int?,
           unitsPerDose: (first['med_units_per_dose'] as num?)?.toDouble(),
           prescriptionStartDate: _parseDateOrNull(
@@ -228,20 +228,25 @@ class MedicationProvider extends ChangeNotifier {
     }
   }
 
-  DateTime _parseDate(String? date) {
-    if (date == null || date.isEmpty) {
-      return DateTime.now().add(const Duration(days: 365));
-    }
-    try {
-      return DateTime.parse(date);
-    } catch (_) {
-      return DateTime.now().add(const Duration(days: 365));
-    }
-  }
-
   DateTime? _parseDateOrNull(String? date) {
     if (date == null || date.isEmpty) return null;
     return DateTime.tryParse(date);
+  }
+
+  String? _cloudExpirationDate(Map<String, dynamic> medication) {
+    final expirationDate = _parseDateOrNull(
+      medication['expiration_date'] as String?,
+    );
+    final prescriptionStartDate = _parseDateOrNull(
+      medication['prescription_start_date'] as String?,
+    );
+    if (Medication.isLegacyDefaultExpiration(
+      expirationDate: expirationDate,
+      prescriptionStartDate: prescriptionStartDate,
+    )) {
+      return null;
+    }
+    return medication['expiration_date'] as String?;
   }
 
   void invalidateCache() {
@@ -451,7 +456,7 @@ class MedicationProvider extends ChangeNotifier {
       'dosage': medication.dosage,
       'form': medication.form,
       'color_hex': medication.color.toARGB32().toRadixString(16),
-      'expiration_date': medication.expirationDate.toIso8601String(),
+      'expiration_date': medication.expirationDate?.toIso8601String(),
       'frequency': medication.frequency,
       'quantity_dispensed': medication.quantityDispensed,
       'units_per_dose': medication.unitsPerDose,
@@ -503,7 +508,7 @@ class MedicationProvider extends ChangeNotifier {
       'dosage': medication.dosage,
       'form': medication.form,
       'color_hex': medication.color.toARGB32().toRadixString(16),
-      'expiration_date': medication.expirationDate.toIso8601String(),
+      'expiration_date': medication.expirationDate?.toIso8601String(),
       'frequency': medication.frequency,
       'quantity_dispensed': medication.quantityDispensed,
       'units_per_dose': medication.unitsPerDose,
@@ -586,7 +591,7 @@ class MedicationProvider extends ChangeNotifier {
       'dosage': medication.dosage,
       'form': medication.form,
       'color_hex': medication.color.toARGB32().toRadixString(16),
-      'expiration_date': medication.expirationDate.toIso8601String(),
+      'expiration_date': medication.expirationDate?.toIso8601String(),
       'frequency': medication.frequency,
       'quantity_dispensed': medication.quantityDispensed,
       'units_per_dose': medication.unitsPerDose,
@@ -784,9 +789,7 @@ class MedicationProvider extends ChangeNotifier {
         'dosage': med['dosage'] ?? '',
         'form': med['form'] ?? 'Tablet',
         'color_hex': med['color_hex'] ?? 'ff00897B',
-        'expiration_date':
-            med['expiration_date'] ??
-            DateTime.now().add(const Duration(days: 365)).toIso8601String(),
+        'expiration_date': _cloudExpirationDate(med),
         'frequency': med['frequency'],
         'quantity_dispensed': med['quantity_dispensed'],
         'units_per_dose': med['units_per_dose'],

@@ -1224,8 +1224,11 @@ class VoiceNavigationProvider extends ChangeNotifier
     final medications = _medications?.medications ?? const <Medication>[];
     final english = <String>[];
     final filipino = <String>[];
-    final ordered = [...medications]
-      ..sort((a, b) => a.daysUntilExpiry.compareTo(b.daysUntilExpiry));
+    final ordered =
+        medications
+            .where((medication) => medication.daysUntilExpiry != null)
+            .toList()
+          ..sort((a, b) => a.daysUntilExpiry!.compareTo(b.daysUntilExpiry!));
     for (final medication in ordered) {
       if (medication.isExpired) {
         english.add('${medication.name} expired, do not take it');
@@ -1233,7 +1236,7 @@ class VoiceNavigationProvider extends ChangeNotifier
         continue;
       }
       if (!medication.isExpiringSoon) continue;
-      final days = medication.daysUntilExpiry;
+      final days = medication.daysUntilExpiry!;
       final when = days == 0
           ? 'today'
           : days == 1
@@ -1584,23 +1587,26 @@ class VoiceNavigationProvider extends ChangeNotifier
 
   String? _expiryReadout(Medication medication, {required bool filipino}) {
     if (!medication.isExpired && !medication.isExpiringSoon) return null;
-    final date = DateFormat('MMMM d, y').format(medication.expirationDate);
+    final expirationDate = medication.expirationDate;
+    final daysUntilExpiry = medication.daysUntilExpiry;
+    if (expirationDate == null || daysUntilExpiry == null) return null;
+    final date = DateFormat('MMMM d, y').format(expirationDate);
     if (medication.isExpired) {
       return filipino
           ? 'expired na noong $date, huwag inumin'
           : 'expired on $date, do not take it';
     }
-    if (medication.daysUntilExpiry == 0) {
+    if (daysUntilExpiry == 0) {
       return filipino
           ? 'mag-e-expire ngayong araw, $date'
           : 'expires today, $date';
     }
-    if (medication.daysUntilExpiry == 1) {
+    if (daysUntilExpiry == 1) {
       return filipino ? 'mag-e-expire bukas, $date' : 'expires tomorrow, $date';
     }
     return filipino
-        ? 'mag-e-expire sa loob ng ${medication.daysUntilExpiry} araw, sa $date'
-        : 'expires in ${medication.daysUntilExpiry} days, on $date';
+        ? 'mag-e-expire sa loob ng $daysUntilExpiry araw, sa $date'
+        : 'expires in $daysUntilExpiry days, on $date';
   }
 
   String _filipinoPeriod(String period) => switch (period) {

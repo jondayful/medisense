@@ -23,12 +23,15 @@ String medicationSemanticsLabel(
   final doseWord = medication.dosage.isEmpty
       ? medication.form
       : '${medication.dosage} ${medication.form}';
-  final expiration =
-      '${medication.expirationDate.month}/${medication.expirationDate.day}/${medication.expirationDate.year}';
-  final expiryStatus = medication.isExpired
-      ? 'expired on $expiration, do not take'
+  final expirationDate = medication.expirationDate;
+  final expiryStatus = expirationDate == null
+      ? 'expiration date not recorded'
+      : medication.isExpired
+      ? 'expired on ${_formatDate(expirationDate)}, do not take'
       : medication.isExpiringSoon
-      ? 'expires in ${medication.daysUntilExpiry} days, on $expiration'
-      : 'expires on $expiration';
+      ? 'expires in ${medication.daysUntilExpiry} days, on ${_formatDate(expirationDate)}'
+      : 'expires on ${_formatDate(expirationDate)}';
   return '${medication.name}, $doseWord, $doses, $expiryStatus.';
 }
+
+String _formatDate(DateTime date) => '${date.month}/${date.day}/${date.year}';

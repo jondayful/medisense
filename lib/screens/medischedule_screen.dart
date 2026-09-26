@@ -1057,22 +1057,26 @@ class _ExpiryNotice extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final expirationDate = medication.expirationDate;
+    if (expirationDate == null) return const SizedBox.shrink();
+
     final expiring = medication.isExpiringSoon;
     final expired = medication.isExpired;
+    final daysUntilExpiry = medication.daysUntilExpiry!;
     final color = expired
         ? AppTheme.error
         : expiring
         ? const Color(0xFFB26A00)
         : muted;
-    final date = DateFormat('MMM d, y').format(medication.expirationDate);
+    final date = DateFormat('MMM d, y').format(expirationDate);
     final label = expired
         ? 'Expired on $date'
         : expiring
-        ? medication.daysUntilExpiry == 0
+        ? daysUntilExpiry == 0
               ? 'Expires today · $date'
-              : medication.daysUntilExpiry == 1
+              : daysUntilExpiry == 1
               ? 'Expires tomorrow · $date'
-              : 'Expires in ${medication.daysUntilExpiry} days · $date'
+              : 'Expires in $daysUntilExpiry days · $date'
         : 'Expires $date';
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,

@@ -112,6 +112,20 @@ class ScheduleTime {
 
 class Medication {
   static const expiryWarningDays = 30;
+  static const _legacyDefaultExpiryWindow = Duration(seconds: 5);
+
+  /// Matches the old form's fabricated `now + 365 days` value. Keeping this
+  /// narrow lets upgrades remove those defaults without clearing a date read
+  /// from a label (which is stored at midnight or at the end of its month).
+  static bool isLegacyDefaultExpiration({
+    required DateTime? expirationDate,
+    required DateTime? prescriptionStartDate,
+  }) {
+    if (expirationDate == null || prescriptionStartDate == null) return false;
+    final difference = expirationDate.difference(prescriptionStartDate);
+    final defaultDifference = const Duration(days: 365);
+    return (difference - defaultDifference).abs() < _legacyDefaultExpiryWindow;
+  }
 
   /// Structured read of [dosage]: unit-preserving, never clamped. Null when
   /// the stored string carries no dose at all.
@@ -141,7 +155,7 @@ class Medication {
   final String name;
   final String dosage;
   final String form;
-  final DateTime expirationDate;
+  final DateTime? expirationDate;
   final List<ScheduleTime> schedule;
   final String frequency;
   final String notes;
@@ -167,18 +181,26 @@ class Medication {
     this.prescriptionReviewed = false,
   });
 
-  DateTime get expirationDay =>
-      DateTime(expirationDate.year, expirationDate.month, expirationDate.day);
-
-  int get daysUntilExpiry {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    return expirationDay.difference(today).inDays;
+  DateTime? get expirationDay {
+    final date = expirationDate;
+    if (date == null) return null;
+    return DateTime(date.year, date.month, date.day);
   }
 
-  bool get isExpired => daysUntilExpiry < 0;
+  int? get daysUntilExpiry {
+    final expiryDay = expirationDay;
+    if (expiryDay == null) return null;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    return expiryDay.difference(today).inDays;
+  }
 
-  bool get isExpiringSoon => !isExpired && daysUntilExpiry <= expiryWarningDays;
+  bool get isExpired => (daysUntilExpiry ?? 0) < 0;
+
+  bool get isExpiringSoon {
+    final days = daysUntilExpiry;
+    return days != null && !isExpired && days <= expiryWarningDays;
+  }
 
   int get dailyDoses => schedule.length;
 

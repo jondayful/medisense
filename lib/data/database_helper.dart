@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:path/path.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:flutter/services.dart';
+import '../models/medication.dart';
 import '../models/user.dart';
 import '../services/password_hasher.dart' as hasher;
 
@@ -251,6 +252,33 @@ class DatabaseHelper {
       await db.execute(
         'CREATE INDEX idx_sync_outbox_retry ON sync_outbox (retry_after, created_at)',
       );
+    }
+    if (oldVersion < 11) {
+      final rows = await db.query(
+        'medications',
+        columns: ['id', 'expiration_date', 'prescription_start_date'],
+        where:
+            'expiration_date IS NOT NULL AND prescription_start_date IS NOT NULL',
+      );
+      for (final row in rows) {
+        final expirationDate = DateTime.tryParse(
+          row['expiration_date'] as String? ?? '',
+        );
+        final prescriptionStartDate = DateTime.tryParse(
+          row['prescription_start_date'] as String? ?? '',
+        );
+        if (Medication.isLegacyDefaultExpiration(
+          expirationDate: expirationDate,
+          prescriptionStartDate: prescriptionStartDate,
+        )) {
+          await db.update(
+            'medications',
+            {'expiration_date': null},
+            where: 'id = ?',
+            whereArgs: [row['id']],
+          );
+        }
+      }
     }
   }
 

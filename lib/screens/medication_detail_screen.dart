@@ -198,8 +198,9 @@ class MedicationDetailScreen extends StatelessWidget {
                         _DetailRow(
                           icon: Icons.calendar_today_rounded,
                           label: 'Expiration',
-                          value:
-                              '${medication.expirationDate.month}/${medication.expirationDate.day}/${medication.expirationDate.year}',
+                          value: medication.expirationDate == null
+                              ? 'Not recorded'
+                              : '${medication.expirationDate!.month}/${medication.expirationDate!.day}/${medication.expirationDate!.year}',
                           valueColor: medication.isExpired ? errorColor : null,
                         ),
                         if (medication.isExpired)
