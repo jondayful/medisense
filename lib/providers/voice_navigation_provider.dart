@@ -133,6 +133,8 @@ class VoiceNavigationProvider extends ChangeNotifier
   bool _isForeground = true;
   bool _disposed = false;
   Future<String?>? _activeScanAnswer;
+  Completer<void>? _voiceInteractionIdle;
+  Completer<void>? _navigationPauseReleased;
   Completer<void>? _resumeVosk;
   Future<void>? _voskInitialization;
   Future<void>? _nativeVoskLoading;
@@ -297,6 +299,11 @@ class VoiceNavigationProvider extends ChangeNotifier
     Duration duration = const Duration(seconds: 8),
   }) async {
     if (_commandSessionActive || _activeScanAnswer != null) return false;
+    if (_disposed || !_isForeground || !_pushToTalkMode) return false;
+    // Camera OCR holds a short navigation pause while it captures and reads
+    // an image. A dock-mic tap during that interval should queue behind the
+    // scan, not silently look unresponsive.
+    await _waitForNavigationResume();
     if (!_canListen) return false;
     final listener = _listener;
     if (listener == null) throw StateError('Offline voice is not ready.');
@@ -366,6 +373,7 @@ class VoiceNavigationProvider extends ChangeNotifier
       _processing = false;
       _commandSessionActive = false;
       _partialHeard = null;
+      _signalVoiceInteractionIdle();
       notifyListeners();
     }
   }
@@ -500,7 +508,13 @@ class VoiceNavigationProvider extends ChangeNotifier
   /// Restarts polling after a tap or a guided answer released the microphone.
   void _ensureWakeLoop() {
     if (!_wakeArmed || _wakeSuspended || _wakeLoop != null) return;
-    if (_disposed || !_pushToTalkMode || !_isForeground) return;
+    if (_disposed ||
+        !_pushToTalkMode ||
+        !_isForeground ||
+        _pauseCount > 0 ||
+        _listener == null) {
+      return;
+    }
     final token = Object();
     _wakeToken = token;
     _wakeLoop = _runWakeLoop(token);
@@ -513,6 +527,7 @@ class VoiceNavigationProvider extends ChangeNotifier
   }
 
   Future<void> _runWakeLoop(Object token) async {
+    var failed = false;
     try {
       while (_wakeArmed &&
           !_wakeSuspended &&
@@ -543,6 +558,7 @@ class VoiceNavigationProvider extends ChangeNotifier
         await _runCommandWindow(listener, const Duration(seconds: 8));
       }
     } catch (error) {
+      failed = true;
       debugPrint('Wake word listener stopped: $error');
     } finally {
       // Clear only our own slot: a newer loop may already own the microphone.
@@ -550,6 +566,10 @@ class VoiceNavigationProvider extends ChangeNotifier
         _wakeLoop = null;
         _wakeToken = null;
       }
+      // A pause can release just before listenForTranscript finishes stopping
+      // its native recorder. In that order _releaseWakeWord() sees the old
+      // future and cannot start another poll; restart here once its slot clears.
+      if (!failed) _ensureWakeLoop();
     }
   }
 
@@ -1327,7 +1347,27 @@ class VoiceNavigationProvider extends ChangeNotifier
 
   /// Additionally holds new model loads until image OCR finishes.
   Future<VoicePause> pauseForImageAnalysis() async {
+    // An OCR capture may finish after a user has already woken the assistant.
+    // Let that bounded interaction finish before taking the mic back for image
+    // analysis, so an automatic scan cannot cut off a live user command.
+    while (!_disposed && (_commandSessionActive || _activeScanAnswer != null)) {
+      await _waitForVoiceInteractionIdle();
+    }
     _analysisPauseCount++;
+    return _finishImageAnalysisPause();
+  }
+
+  /// Pauses only when the user is not actively speaking a command or answer.
+  /// Camera framing hints use this so they never cut off wake-word follow-up.
+  Future<VoicePause?> tryPauseForImageAnalysis() {
+    if (_disposed || _commandSessionActive || _activeScanAnswer != null) {
+      return Future<VoicePause?>.value(null);
+    }
+    _analysisPauseCount++;
+    return _finishImageAnalysisPause();
+  }
+
+  Future<VoicePause> _finishImageAnalysisPause() async {
     final navigation = await pauseNavigation();
     // Let an in-flight native model load finish so image work does not compete
     // with it. An unavailable voice model must not abort image analysis.
@@ -1348,8 +1388,43 @@ class VoiceNavigationProvider extends ChangeNotifier
   void _releaseNavigationPause() {
     if (_pauseCount > 0) _pauseCount--;
     // Hand the microphone back once nothing is holding it.
-    if (_pauseCount == 0) _releaseWakeWord();
+    if (_pauseCount == 0) {
+      final released = _navigationPauseReleased;
+      _navigationPauseReleased = null;
+      if (released != null && !released.isCompleted) released.complete();
+      _releaseWakeWord();
+    }
     notifyListeners();
+  }
+
+  Future<void> _waitForNavigationResume() async {
+    final deadline = DateTime.now().add(const Duration(seconds: 12));
+    while (_pauseCount > 0 && !_disposed) {
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining <= Duration.zero) return;
+      final released = _navigationPauseReleased ??= Completer<void>();
+      try {
+        await released.future.timeout(remaining);
+      } on TimeoutException {
+        // A stuck native OCR request must not leave the mic button waiting
+        // forever. The caller checks the pause state before opening audio.
+        return;
+      }
+    }
+  }
+
+  Future<void> _waitForVoiceInteractionIdle() async {
+    while (!_disposed && (_commandSessionActive || _activeScanAnswer != null)) {
+      final idle = _voiceInteractionIdle ??= Completer<void>();
+      await idle.future;
+    }
+  }
+
+  void _signalVoiceInteractionIdle() {
+    if (_commandSessionActive || _activeScanAnswer != null) return;
+    final idle = _voiceInteractionIdle;
+    _voiceInteractionIdle = null;
+    if (idle != null && !idle.isCompleted) idle.complete();
   }
 
   Future<void> stopListening() async {
@@ -1662,6 +1737,12 @@ class VoiceNavigationProvider extends ChangeNotifier
     _disposed = true;
     _wakeArmed = false;
     _wakeLoop = null;
+    final released = _navigationPauseReleased;
+    _navigationPauseReleased = null;
+    if (released != null && !released.isCompleted) released.complete();
+    final idle = _voiceInteractionIdle;
+    _voiceInteractionIdle = null;
+    if (idle != null && !idle.isCompleted) idle.complete();
     _prompt = null;
     _undoableTakes.clear();
     WidgetsBinding.instance.removeObserver(this);

@@ -123,7 +123,6 @@ class _MediScanScreenState extends State<MediScanScreen>
   bool _screenDisposing = false;
   bool _cameraSuspended = false;
   bool _streamDetectsPrescription = false;
-  ScanHint? _lastCameraHint;
   DateTime? _lastCameraHintAt;
   int _cameraHintGeneration = 0;
   Future<void> _cameraHintSpeech = Future<void>.value();
@@ -513,13 +512,20 @@ class _MediScanScreenState extends State<MediScanScreen>
   void _onCameraOcrHint(ScanHint hint) {
     if (!mounted || _screenDisposing || _cameraSuspended) return;
     if (!context.read<AppStateProvider>().voiceNavigationEnabled) return;
-    final now = DateTime.now();
-    if (_lastCameraHint == hint &&
-        _lastCameraHintAt != null &&
-        now.difference(_lastCameraHintAt!) < const Duration(seconds: 4)) {
+    final voice = context.read<VoiceNavigationProvider>();
+    // User speech has priority over camera guidance. Repeated auto-framing
+    // cues used to stop the wake listener often enough that it felt disabled.
+    if (_imageInferenceActive ||
+        voice.isListening ||
+        voice.isProcessing ||
+        voice.isScanAnswerListening) {
       return;
     }
-    _lastCameraHint = hint;
+    final now = DateTime.now();
+    if (_lastCameraHintAt != null &&
+        now.difference(_lastCameraHintAt!) < const Duration(seconds: 8)) {
+      return;
+    }
     _lastCameraHintAt = now;
     final generation = ++_cameraHintGeneration;
     _cameraHintSpeech = _speakCameraHint(hint, generation).catchError((error) {
@@ -533,7 +539,8 @@ class _MediScanScreenState extends State<MediScanScreen>
     // pauseForImageAnalysis stops the active utterance before this cue and
     // prevents voice-command listening from competing with the guidance. The
     // returned handle must always be released, including on early return.
-    final pause = await voice.pauseForImageAnalysis();
+    final pause = await voice.tryPauseForImageAnalysis();
+    if (pause == null) return;
     try {
       if (!mounted || _screenDisposing || generation != _cameraHintGeneration) {
         return;
