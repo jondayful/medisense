@@ -120,6 +120,7 @@ class _MediScanScreenState extends State<MediScanScreen>
   bool _waitingForGreetingBeforeAutoScan = false;
   bool _cameraPreviewActive = false;
   bool _voiceStartupGateInstalled = false;
+  VoiceNavigationProvider? _voiceNavigation;
   bool _screenDisposing = false;
   bool _cameraSuspended = false;
   bool _streamDetectsPrescription = false;
@@ -166,6 +167,7 @@ class _MediScanScreenState extends State<MediScanScreen>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    _voiceNavigation = context.read<VoiceNavigationProvider>();
     if (!_voiceStartupGateInstalled) {
       context.read<VoiceNavigationProvider>().deferVoskInitializationUntil(
         _voiceStartupReady.future,
@@ -203,11 +205,11 @@ class _MediScanScreenState extends State<MediScanScreen>
     _initialGreetingTask = _speakIfVoiceNavigationEnabled(
       tts,
       name == null
-          ? 'Align a medicine label and tap scan.'
-          : 'Hello $name, align a medicine label and tap scan.',
+          ? 'Align the medicine label with the camera and wait for it to scan.'
+          : 'Hello $name, align the medicine label with the camera and wait for it to scan.',
       name == null
-          ? 'Itapat ang etiketa ng gamot at pindutin ang I-scan.'
-          : 'Kumusta, $name. Itapat ang etiketa ng gamot at pindutin ang I-scan.',
+          ? 'Itapat ang label ng gamot sa camera at hintayin itong ma-scan.'
+          : 'Hello $name, itapat ang label ng gamot sa camera at hintayin itong ma-scan.',
     );
     _hasGreeted = true;
     unawaited(
@@ -257,7 +259,13 @@ class _MediScanScreenState extends State<MediScanScreen>
     WidgetsBinding.instance.removeObserver(this);
     _autoScanTimer?.cancel();
     _initialAutoScanTimer?.cancel();
-    unawaited(_closeCamera());
+    unawaited(
+      _closeCamera().whenComplete(() {
+        // Camera/OCR can briefly own the microphone. Re-arm wake listening after
+        // its native resources have closed when leaving Scan.
+        _voiceNavigation?.enableWakeWord();
+      }),
+    );
     unawaited(_ocrCoordinator.dispose());
     _barcodeScanner.dispose();
     unawaited(_imagePreprocessor.dispose());
@@ -511,7 +519,12 @@ class _MediScanScreenState extends State<MediScanScreen>
 
   void _onCameraOcrHint(ScanHint hint) {
     if (!mounted || _screenDisposing || _cameraSuspended) return;
-    if (!context.read<AppStateProvider>().voiceNavigationEnabled) return;
+    if (_initialGreetingStarted && !_initialGreetingFinished) return;
+    final appState = context.read<AppStateProvider>();
+    if (!appState.voiceNavigationEnabled ||
+        appState.ttsVerbosity == TtsVerbosity.essential) {
+      return;
+    }
     final voice = context.read<VoiceNavigationProvider>();
     // User speech has priority over camera guidance. Repeated auto-framing
     // cues used to stop the wake listener often enough that it felt disabled.

@@ -4,6 +4,7 @@ import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'theme/app_theme.dart';
 import 'models/accessibility_mode.dart';
 import 'screens/dashboard_screen.dart';
@@ -49,6 +50,12 @@ class _MediSenseAppState extends State<MediSenseApp>
   bool _passwordRecoveryLinkReceived = false;
   String? _lastRecoveryLink;
   AppStateProvider? _appStateProvider;
+  AuthProvider? _authProvider;
+  Timer? _careReminderTimer;
+  String? _careReminderPatientId;
+  bool _careReminderChecking = false;
+  bool _careReminderForeground = true;
+  final List<String> _routeHistory = [];
 
   @override
   void initState() {
@@ -73,74 +80,80 @@ class _MediSenseAppState extends State<MediSenseApp>
       routes: [
         GoRoute(
           path: '/auth',
-          builder: (context, state) => AuthScreen(
-            emailConfirmed:
-                state.uri.queryParameters['emailConfirmed'] == 'true',
-            pairingId: state.uri.queryParameters['pairingId'],
+          builder: (context, state) => _withBack(
+            AuthScreen(
+              emailConfirmed:
+                  state.uri.queryParameters['emailConfirmed'] == 'true',
+              pairingId: state.uri.queryParameters['pairingId'],
+            ),
           ),
         ),
         GoRoute(
           path: '/reset-password',
-          builder: (context, state) => PasswordRecoveryScreen(
-            status: state.uri.queryParameters['status'] ?? 'invalid',
+          builder: (context, state) => _withBack(
+            PasswordRecoveryScreen(
+              status: state.uri.queryParameters['status'] ?? 'invalid',
+            ),
           ),
         ),
         GoRoute(
           path: '/profile',
-          builder: (context, state) => const ProfileScreen(),
+          builder: (context, state) => _withBack(const ProfileScreen()),
         ),
         GoRoute(
           path: '/accessibility-choice',
-          builder: (context, state) => const OnboardingSetupScreen(),
+          builder: (context, state) => _withBack(const OnboardingSetupScreen()),
         ),
         GoRoute(
           path: '/onboarding',
-          builder: (context, state) => const OnboardingSetupScreen(),
+          builder: (context, state) => _withBack(const OnboardingSetupScreen()),
         ),
         GoRoute(
           path: '/',
-          builder: (context, state) => const DashboardScreen(),
+          builder: (context, state) => _withBack(const DashboardScreen()),
         ),
         GoRoute(
           path: '/scan',
-          builder: (context, state) => const MediScanScreen(),
+          builder: (context, state) => _withBack(const MediScanScreen()),
         ),
         GoRoute(
           path: '/schedule',
-          builder: (context, state) => const MediScheduleScreen(),
+          builder: (context, state) => _withBack(const MediScheduleScreen()),
         ),
         GoRoute(
           path: '/medication/:id',
           builder: (context, state) {
             final id = state.pathParameters['id']!;
-            return MedicationDetailScreen(medicationId: id);
+            return _withBack(MedicationDetailScreen(medicationId: id));
           },
         ),
         GoRoute(
           path: '/guardian',
-          builder: (context, state) => const GuardianScreen(),
+          builder: (context, state) => _withBack(const GuardianScreen()),
         ),
         GoRoute(
           path: '/settings',
-          builder: (context, state) => const SettingsScreen(),
+          builder: (context, state) => _withBack(const SettingsScreen()),
         ),
         GoRoute(
           path: '/user-manual',
-          builder: (context, state) => const UserManualScreen(),
+          builder: (context, state) => _withBack(const UserManualScreen()),
         ),
         GoRoute(
           path: '/terms',
-          builder: (context, state) =>
-              const LegalDocumentScreen(type: LegalDocumentType.terms),
+          builder: (context, state) => _withBack(
+            const LegalDocumentScreen(type: LegalDocumentType.terms),
+          ),
         ),
         GoRoute(
           path: '/privacy',
-          builder: (context, state) =>
-              const LegalDocumentScreen(type: LegalDocumentType.privacy),
+          builder: (context, state) => _withBack(
+            const LegalDocumentScreen(type: LegalDocumentType.privacy),
+          ),
         ),
         GoRoute(
           path: '/payment-success',
-          builder: (context, state) => const PaymentSuccessScreen(),
+          builder: (context, state) => _withBack(const PaymentSuccessScreen()),
         ),
         GoRoute(
           path: '/alarm',
@@ -148,9 +161,11 @@ class _MediSenseAppState extends State<MediSenseApp>
             final extra = state.extra is Map
                 ? state.extra as Map
                 : const <String, dynamic>{};
-            return AlarmAlertScreen(
-              medicationId: extra['medicationId'] as String? ?? '',
-              scheduleId: extra['scheduleId'] as String? ?? '',
+            return _withBack(
+              AlarmAlertScreen(
+                medicationId: extra['medicationId'] as String? ?? '',
+                scheduleId: extra['scheduleId'] as String? ?? '',
+              ),
             );
           },
         ),
@@ -264,12 +279,21 @@ class _MediSenseAppState extends State<MediSenseApp>
     _appStateProvider?.removeListener(_syncVoiceNavigationMode);
     _appStateProvider = nextAppState;
     _appStateProvider?.addListener(_syncVoiceNavigationMode);
+    final nextAuth = context.read<AuthProvider>();
+    if (_authProvider != nextAuth) {
+      _authProvider?.removeListener(_syncCareReminderPolling);
+      _authProvider = nextAuth;
+      _authProvider?.addListener(_syncCareReminderPolling);
+      _syncCareReminderPolling();
+    }
   }
 
   @override
   void dispose() {
     unawaited(_deepLinkSubscription?.cancel() ?? Future<void>.value());
     _appStateProvider?.removeListener(_syncVoiceNavigationMode);
+    _authProvider?.removeListener(_syncCareReminderPolling);
+    _careReminderTimer?.cancel();
     _router.routerDelegate.removeListener(_onRouteChanged);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
@@ -359,6 +383,83 @@ class _MediSenseAppState extends State<MediSenseApp>
     }
   }
 
+  void _syncCareReminderPolling() {
+    if (!mounted) return;
+    final auth = _authProvider;
+    final patientId =
+        auth != null &&
+            auth.isLoggedIn &&
+            auth.isPatient &&
+            SupabaseService.isConfigured &&
+            _careReminderForeground
+        ? auth.userId
+        : null;
+    if (patientId == _careReminderPatientId && _careReminderTimer != null) {
+      return;
+    }
+    _careReminderTimer?.cancel();
+    _careReminderTimer = null;
+    _careReminderPatientId = patientId;
+    if (patientId == null) return;
+    unawaited(_checkCareReminders(patientId));
+    _careReminderTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      unawaited(_checkCareReminders(patientId));
+    });
+  }
+
+  Future<void> _checkCareReminders(String patientId) async {
+    if (_careReminderChecking ||
+        !mounted ||
+        _careReminderPatientId != patientId) {
+      return;
+    }
+    _careReminderChecking = true;
+    try {
+      final rows = await SupabaseSyncService().fetchRecentCareReminderIds(
+        patientId,
+      );
+      if (!mounted || _careReminderPatientId != patientId) return;
+      final prefs = await SharedPreferences.getInstance();
+      if (!mounted || _careReminderPatientId != patientId) return;
+      final key = 'seen_care_reminders_$patientId';
+      final previous = prefs.getStringList(key);
+      final ids = rows.map((row) => row['id'].toString()).toList();
+      if (previous != null) {
+        final seen = previous.toSet();
+        final fresh = rows.where((row) => !seen.contains(row['id'].toString()));
+        if (fresh.isNotEmpty &&
+            context.read<AppStateProvider>().notificationsEnabled) {
+          final reminder = fresh.first;
+          final medId = reminder['medication_id']?.toString();
+          final scheduleId = reminder['schedule_id']?.toString();
+          final meds = context.read<MedicationProvider>();
+          var medication = medId == null ? null : meds.getById(medId);
+          if (medication == null) {
+            await meds.loadMedications(forceRefresh: true);
+            if (!mounted || _careReminderPatientId != patientId) return;
+            medication = medId == null ? null : meds.getById(medId);
+          }
+          if (medication != null &&
+              medId != null &&
+              scheduleId != null &&
+              mounted) {
+            await context.read<NotificationProvider>().ringGuardianReminder(
+              medicationId: medId,
+              scheduleId: scheduleId,
+              medicationName: medication.name,
+              patientName: _authProvider?.userName ?? 'kaibigan',
+            );
+          }
+        }
+      }
+      await prefs.setStringList(key, {...ids, ...?previous}.take(50).toList());
+    } catch (error) {
+      debugPrint('Care reminder check failed: $error');
+    } finally {
+      _careReminderChecking = false;
+    }
+  }
+
   void _initializeInstalledWakeWordModel(VoiceNavigationProvider voice) {
     if (voice.isVoskInitialized || _wakeWordModelInitialization != null) {
       return;
@@ -397,20 +498,73 @@ class _MediSenseAppState extends State<MediSenseApp>
           .toString();
       if (location.startsWith('/reset-password')) return;
       if (location.isNotEmpty) {
-        final appState = context.read<AppStateProvider>();
-        appState.saveLastRoute(location);
+        final isNewRoute =
+            _routeHistory.isEmpty || _routeHistory.last != location;
+        if (isNewRoute) {
+          _routeHistory.add(location);
+          if (_routeHistory.length > 30) _routeHistory.removeAt(0);
+          final path = _router.routerDelegate.currentConfiguration.uri.path;
+          if (path != '/' &&
+              path != '/scan' &&
+              path != '/schedule' &&
+              path != '/alarm') {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) {
+                context.read<VoiceNavigationProvider>().announceScreen(path);
+              }
+            });
+          }
+        }
+        if (!location.startsWith('/alarm')) {
+          final appState = context.read<AppStateProvider>();
+          appState.saveLastRoute(location);
+        }
       }
     } catch (_) {}
   }
 
+  Future<bool> _handleSystemBack() async {
+    if (_router.canPop()) {
+      _router.pop();
+      return true;
+    }
+    if (_routeHistory.length > 1) {
+      _routeHistory.removeLast();
+      _router.go(_routeHistory.last);
+      return true;
+    }
+    final current = _router.routerDelegate.currentConfiguration.uri.path;
+    if (current != '/') {
+      _router.go('/');
+      return true;
+    }
+    return false;
+  }
+
+  Widget _withBack(Widget screen) => Builder(
+    builder: (routeContext) => BackButtonListener(
+      onBackButtonPressed: () {
+        final navigator = Navigator.of(routeContext);
+        if (navigator.canPop() && !_router.canPop()) {
+          navigator.pop();
+          return Future<bool>.value(true);
+        }
+        return _handleSystemBack();
+      },
+      child: screen,
+    ),
+  );
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _careReminderForeground = state == AppLifecycleState.resumed;
+    _syncCareReminderPolling();
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
       try {
         final appState = context.read<AppStateProvider>();
         final location = _router.routerDelegate.currentConfiguration.uri.path;
-        if (location.isNotEmpty) {
+        if (location.isNotEmpty && location != '/alarm') {
           appState.saveLastRoute(location);
         }
       } catch (_) {}

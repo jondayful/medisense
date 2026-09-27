@@ -205,7 +205,8 @@ class MedicationProvider extends ChangeNotifier {
               {
                 'id': notifications.safeNotificationId(schedule.id),
                 'title': '${medication.name} due now',
-                'body': '${medication.dosage}, ${medication.form}',
+                'body':
+                    'Hello, ${_appStateProvider?.savedUserName ?? _appStateProvider?.onboardingName ?? 'kaibigan'} oras na para uminom ng ${medication.name}',
                 'time': schedule.time,
                 'medicationId': medication.id,
                 'scheduleId': schedule.id,

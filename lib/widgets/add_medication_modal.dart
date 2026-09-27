@@ -8,6 +8,7 @@ import '../providers/notification_provider.dart';
 import '../providers/app_state_provider.dart';
 import '../models/medication.dart';
 import '../models/dosage.dart';
+import '../services/medicine_expiry_parser.dart';
 
 class AddMedicationModal extends StatefulWidget {
   final Medication? initialMedication;
@@ -233,6 +234,7 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
   String? _selectedFrequency = 'Once a day';
   TimeOfDay? _selectedTime;
   DateTime? _selectedExpirationDate;
+  final _expirationCtrl = TextEditingController();
   String _selectedForm = 'Tablet';
   final Map<String, bool> _preservedTaken = {};
 
@@ -243,6 +245,9 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
     _selectedExpirationDate =
         widget.initialMedication?.expirationDate ??
         widget.initialExpirationDate;
+    if (_selectedExpirationDate != null) {
+      _expirationCtrl.text = _formatExpiration(_selectedExpirationDate!);
+    }
     if (widget.initialMedication != null) {
       _nameCtrl.text = widget.initialMedication!.name;
       _selectedForm = widget.initialMedication!.form;
@@ -289,6 +294,7 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
     _nameCtrl.dispose();
     _quantityCtrl.dispose();
     _unitsPerDoseCtrl.dispose();
+    _expirationCtrl.dispose();
     super.dispose();
   }
 
@@ -319,9 +325,15 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
       helpText: 'Select the date printed on the medicine label',
     );
     if (picked != null && mounted) {
-      setState(() => _selectedExpirationDate = DateUtils.dateOnly(picked));
+      setState(() {
+        _selectedExpirationDate = DateUtils.dateOnly(picked);
+        _expirationCtrl.text = _formatExpiration(picked);
+      });
     }
   }
+
+  String _formatExpiration(DateTime date) =>
+      '${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}-${date.year.toString().padLeft(4, '0')}';
 
   void _prefillDosage(String source) {
     final parsed = Dosage.parse(source);
@@ -419,6 +431,19 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
       final confirmed = await _confirmInsulinDose();
       if (!confirmed || !mounted) return;
     }
+    final expirationInput = _expirationCtrl.text.trim();
+    final expiration = expirationInput.isEmpty
+        ? null
+        : MedicineExpiryParser.parseManual(expirationInput);
+    if (expirationInput.isNotEmpty && expiration == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Enter a real expiration date in MM-DD-YYYY format.'),
+        ),
+      );
+      return;
+    }
+    _selectedExpirationDate = expiration;
     _selectedTime ??= const TimeOfDay(hour: 8, minute: 0);
 
     final provider = context.read<MedicationProvider>();
@@ -601,7 +626,7 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
             ),
             const SizedBox(height: 14),
             Text(
-              'MediSense needs notification access for alarm controls and exact-alarm access to ring at $timeLabel. Enable these in Android Settings, return here, then save the schedule again.',
+              'MediSense needs notification, exact alarm, and full-screen alarm access to ring at $timeLabel. Enable these in Android Settings, return here, then save the schedule again.',
               style: AppTheme.textStyle(
                 fontSize: 17,
                 height: 1.35,
@@ -740,13 +765,13 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
                 const SizedBox(height: 16),
                 _buildDosageControl(),
                 const SizedBox(height: 16),
+                _buildExpirationDateControl(accent),
+                const SizedBox(height: 16),
                 _buildFormDropdown(accent),
                 const SizedBox(height: 16),
                 _buildFrequencyDropdown(accent),
                 const SizedBox(height: 16),
                 _buildPrescriptionSupplyFields(accent),
-                const SizedBox(height: 16),
-                _buildExpirationDateControl(accent),
                 const SizedBox(height: 16),
                 _buildTimePicker(accent),
                 const SizedBox(height: 32),
@@ -796,10 +821,6 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
   }
 
   Widget _buildExpirationDateControl(Color accent) {
-    final date = _selectedExpirationDate;
-    final label = date == null
-        ? 'Not recorded'
-        : '${date.month}/${date.day}/${date.year}';
     return Container(
       decoration: BoxDecoration(
         color: accent,
@@ -808,63 +829,39 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
       ),
       child: Row(
         children: [
+          const SizedBox(width: 16),
           Expanded(
-            child: Semantics(
-              button: true,
-              label: 'Expiration date, $label. Tap to choose or update.',
-              child: InkWell(
-                borderRadius: BorderRadius.circular(16),
-                onTap: _pickExpirationDate,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 14,
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.calendar_today_rounded,
-                        color: _formTextColor(context),
-                        size: 24,
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Expiration Date (optional)',
-                              style: AppTheme.textStyle(
-                                color: _formLabelColor(context),
-                                fontSize: 15,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              label,
-                              style: AppTheme.textStyle(
-                                color: _formTextColor(context),
-                                fontSize: 15,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Icon(
-                        Icons.edit_calendar_rounded,
-                        color: _formTextColor(context),
-                      ),
-                    ],
-                  ),
-                ),
+            child: TextField(
+              controller: _expirationCtrl,
+              keyboardType: TextInputType.datetime,
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'[0-9-]')),
+                LengthLimitingTextInputFormatter(10),
+              ],
+              decoration: const InputDecoration(
+                labelText: 'Expiration Date (optional)',
+                hintText: 'MM-DD-YYYY',
+                border: InputBorder.none,
+              ),
+              onChanged: (value) => setState(
+                () => _selectedExpirationDate =
+                    MedicineExpiryParser.parseManual(value),
               ),
             ),
           ),
-          if (date != null)
+          IconButton(
+            tooltip: 'Choose expiration date from calendar',
+            onPressed: _pickExpirationDate,
+            icon: const Icon(Icons.edit_calendar_rounded),
+            color: _formTextColor(context),
+          ),
+          if (_expirationCtrl.text.isNotEmpty)
             IconButton(
               tooltip: 'Clear expiration date',
-              onPressed: () => setState(() => _selectedExpirationDate = null),
+              onPressed: () => setState(() {
+                _expirationCtrl.clear();
+                _selectedExpirationDate = null;
+              }),
               icon: const Icon(Icons.clear_rounded),
               color: _formTextColor(context),
             ),

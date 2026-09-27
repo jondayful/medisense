@@ -1,6 +1,13 @@
 package com.matech.medisense
 
 import android.content.Intent
+import android.app.NotificationManager
+import android.content.Context
+import android.net.Uri
+import android.os.Bundle
+import android.os.Build
+import android.provider.Settings
+import android.view.WindowManager
 import android.os.StatFs
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -8,6 +15,21 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private var alarmChannel: MethodChannel? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        if (intent?.action == MedicationAlarmService.ACTION_OPEN_ALARM) showAlarmOverLockScreen()
+        super.onCreate(savedInstanceState)
+    }
+
+    private fun showAlarmOverLockScreen() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -33,9 +55,20 @@ class MainActivity : FlutterActivity() {
         alarmChannel?.setMethodCallHandler { call, result ->
                 try {
                     when (call.method) {
+                        "ensureFullScreenAccess" -> {
+                            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                            val allowed = Build.VERSION.SDK_INT < 34 || manager.canUseFullScreenIntent()
+                            if (!allowed) {
+                                startActivity(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                                    Uri.parse("package:$packageName")))
+                            }
+                            result.success(allowed)
+                        }
                         "takeLaunchAlarmAction" -> {
-                            if (intent.action == MedicationAlarmService.ACTION_MARK_TAKEN) {
+                            if (intent.action == MedicationAlarmService.ACTION_MARK_TAKEN ||
+                                intent.action == MedicationAlarmService.ACTION_OPEN_ALARM) {
                                 val action = mapOf(
+                                    "type" to if (intent.action == MedicationAlarmService.ACTION_OPEN_ALARM) "open" else "taken",
                                     "medicationId" to intent.getStringExtra(EXTRA_MEDICATION_ID),
                                     "scheduleId" to intent.getStringExtra(EXTRA_SCHEDULE_ID),
                                 )
@@ -83,6 +116,23 @@ class MainActivity : FlutterActivity() {
                             MedicationAlarmScheduler.schedule(this, alarm)
                             result.success(null)
                         }
+                        "ringNow" -> {
+                            val alarm = MedicationAlarm(
+                                id = call.argument<Int>("id")
+                                    ?: throw IllegalArgumentException("Alarm ID is required."),
+                                title = call.argument<String>("title") ?: "Medication reminder",
+                                body = call.argument<String>("body") ?: "Time to take your medicine",
+                                medicationId = call.argument<String>("medicationId") ?: "",
+                                scheduleId = call.argument<String>("scheduleId") ?: "",
+                                hour = 0,
+                                minute = 0,
+                            )
+                            startForegroundService(alarm.putIn(
+                                Intent(this, MedicationAlarmService::class.java)
+                                    .setAction(MedicationAlarmService.ACTION_RING),
+                            ))
+                            result.success(null)
+                        }
                         "cancelAlarm" -> {
                             val id = call.argument<Int>("id")
                                 ?: throw IllegalArgumentException("Alarm ID is required.")
@@ -127,8 +177,11 @@ class MainActivity : FlutterActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (intent.action == MedicationAlarmService.ACTION_MARK_TAKEN) {
+        if (intent.action == MedicationAlarmService.ACTION_OPEN_ALARM) showAlarmOverLockScreen()
+        if (intent.action == MedicationAlarmService.ACTION_MARK_TAKEN ||
+            intent.action == MedicationAlarmService.ACTION_OPEN_ALARM) {
             val action = mapOf(
+                "type" to if (intent.action == MedicationAlarmService.ACTION_OPEN_ALARM) "open" else "taken",
                 "medicationId" to intent.getStringExtra(EXTRA_MEDICATION_ID),
                 "scheduleId" to intent.getStringExtra(EXTRA_SCHEDULE_ID),
             )

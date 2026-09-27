@@ -1470,10 +1470,45 @@ class VoiceNavigationProvider extends ChangeNotifier
 
   void announceScreen(String route) {
     if (!_pushToTalkMode) return;
+    final verbosity = _appState?.ttsVerbosity ?? TtsVerbosity.standard;
+    // The scanner owns its longer greeting and camera guidance.
+    if (route == '/scan' || verbosity == TtsVerbosity.essential) return;
+    if (route.startsWith('/medication/')) {
+      final id = Uri.decodeComponent(route.substring('/medication/'.length));
+      final med = _medications?.getById(id);
+      if (med != null) {
+        final times = [...med.schedule]
+          ..sort(
+            (a, b) => (a.time.hour * 60 + a.time.minute).compareTo(
+              b.time.hour * 60 + b.time.minute,
+            ),
+          );
+        unawaited(
+          _tts?.speak(
+                verbosity == TtsVerbosity.detailed
+                    ? '${med.name} details. Strength ${med.dosage}. Scheduled at ${times.map((s) => s.formattedTime).join(', ')}.'
+                    : '${med.name} details.',
+                verbosity == TtsVerbosity.detailed
+                    ? 'Detalye ng ${med.name}. Lakas ${med.dosage}. Nakatakda sa ${times.map((s) => s.formattedTime).join(', ')}.'
+                    : 'Detalye ng ${med.name}.',
+              ) ??
+              Future<void>.value(),
+        );
+        return;
+      }
+    }
     final named = kVoiceScreenAnnouncements[route];
     if (named != null) {
       unawaited(
-        _tts?.speak(named.english, named.filipino) ?? Future<void>.value(),
+        _tts?.speak(
+              verbosity == TtsVerbosity.detailed
+                  ? '${named.english}. ${_screenHelp(route, filipino: false)}'
+                  : named.english,
+              verbosity == TtsVerbosity.detailed
+                  ? '${named.filipino}. ${_screenHelp(route, filipino: true)}'
+                  : named.filipino,
+            ) ??
+            Future<void>.value(),
       );
       return;
     }
@@ -1505,6 +1540,35 @@ class VoiceNavigationProvider extends ChangeNotifier
           ) ??
           Future<void>.value(),
     );
+  }
+
+  String _screenHelp(String route, {required bool filipino}) {
+    return switch (route) {
+      '/' =>
+        filipino
+            ? 'Makikita rito ang susunod na gamot at mga paalala.'
+            : 'Your next medicine and reminders are here.',
+      '/schedule' =>
+        filipino
+            ? 'Nakaayos ang mga gamot ayon sa oras. Pumili ng gamot para sa detalye.'
+            : 'Medicines are ordered by time. Select one for details.',
+      '/settings' =>
+        filipino
+            ? 'Dito mo mababago ang boses, mga anunsiyo, at mga alarm.'
+            : 'Change voice, announcements, and alarms here.',
+      '/guardian' =>
+        filipino
+            ? 'Tingnan dito ang mga konektadong tagapangalaga at paanyaya.'
+            : 'Review connected guardians and invitations here.',
+      '/profile' =>
+        filipino
+            ? 'Tingnan at baguhin ang impormasyon ng iyong account.'
+            : 'Review and update your account information.',
+      _ =>
+        filipino
+            ? 'Gamitin ang mga pindutan sa pahinang ito para magpatuloy.'
+            : 'Use the buttons on this screen to continue.',
+    };
   }
 
   void speakWhereContext(String route) {
@@ -1552,26 +1616,33 @@ class VoiceNavigationProvider extends ChangeNotifier
   String _scheduleReadout({bool filipino = false, String? period}) {
     final meds = _medications?.medications ?? <Medication>[];
     final spokenExpiryFor = <String>{};
-    final items = meds
-        .expand(
-          (med) => med.schedule
-              .where((time) => period == null || time.label == period)
-              .map((time) {
-                final name = _spokenName(med);
-                final strength = MedicineSpeechFormatter.strength(med.dosage);
-                final medicine = [
-                  name,
-                  strength,
-                ].where((part) => part.isNotEmpty).join(', ');
-                final expiry = spokenExpiryFor.add(med.id)
-                    ? _expiryReadout(med, filipino: filipino)
-                    : null;
-                return filipino
-                    ? '$medicine, sa ${time.formattedTime}${expiry == null ? '' : ', $expiry'}'
-                    : '$medicine at ${time.formattedTime}${expiry == null ? '' : ', $expiry'}';
-              }),
-        )
-        .toList();
+    final doses =
+        [
+          for (final med in meds)
+            for (final time in med.schedule)
+              if (period == null || time.label == period)
+                (med: med, time: time),
+        ]..sort((a, b) {
+          final aMinutes = a.time.time.hour * 60 + a.time.time.minute;
+          final bMinutes = b.time.time.hour * 60 + b.time.time.minute;
+          return aMinutes.compareTo(bMinutes);
+        });
+    final items = doses.map((dose) {
+      final med = dose.med;
+      final time = dose.time;
+      final name = _spokenName(med);
+      final strength = MedicineSpeechFormatter.strength(med.dosage);
+      final medicine = [
+        name,
+        strength,
+      ].where((part) => part.isNotEmpty).join(', ');
+      final expiry = spokenExpiryFor.add(med.id)
+          ? _expiryReadout(med, filipino: filipino)
+          : null;
+      return filipino
+          ? '$medicine, sa ${time.formattedTime}${expiry == null ? '' : ', $expiry'}'
+          : '$medicine at ${time.formattedTime}${expiry == null ? '' : ', $expiry'}';
+    }).toList();
     return items.isEmpty
         ? filipino
               ? period == null

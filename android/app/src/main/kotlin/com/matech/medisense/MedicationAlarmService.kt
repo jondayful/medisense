@@ -14,15 +14,23 @@ import android.media.MediaPlayer
 import android.media.RingtoneManager
 import android.os.Build
 import android.os.IBinder
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.speech.tts.TextToSpeech
 import android.os.VibrationEffect
 import android.os.Vibrator
 import org.json.JSONObject
+import java.util.Locale
 
 class MedicationAlarmService : Service() {
     private var player: MediaPlayer? = null
     private var vibrator: Vibrator? = null
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
+    private var speaker: TextToSpeech? = null
+    private val repeatHandler = Handler(Looper.getMainLooper())
+    private var repeatSpeech: Runnable? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -56,11 +64,11 @@ class MedicationAlarmService : Service() {
         saveActiveAlarm(alarm)
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification(alarm))
-        startAlarmSoundAndVibration()
+        startAlarmSoundAndVibration(alarm)
         return START_STICKY
     }
 
-    private fun startAlarmSoundAndVibration() {
+    private fun startAlarmSoundAndVibration(alarm: MedicationAlarm) {
         stopPlayback()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -78,6 +86,52 @@ class MedicationAlarmService : Service() {
             audioManager?.requestAudioFocus(audioFocusRequest!!)
         }
 
+        speaker = TextToSpeech(this) { status ->
+            if (currentAlarmId != alarm.id) return@TextToSpeech
+            if (status == TextToSpeech.SUCCESS) {
+                speaker?.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ALARM)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build(),
+                )
+                val language = speaker?.setLanguage(Locale("fil", "PH"))
+                if (language == TextToSpeech.LANG_MISSING_DATA ||
+                    language == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    speaker?.language = Locale.US
+                }
+                val repeat = object : Runnable {
+                    override fun run() {
+                        if (currentAlarmId != alarm.id) return
+                        val spoken = speaker?.speak(
+                            alarm.body,
+                            TextToSpeech.QUEUE_FLUSH,
+                            Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1f) },
+                            "dose-${alarm.id}",
+                        ) ?: TextToSpeech.ERROR
+                        if (spoken == TextToSpeech.ERROR) {
+                            startFallbackTone()
+                            return
+                        }
+                        repeatHandler.postDelayed(this, 9000)
+                    }
+                }
+                repeatSpeech = repeat
+                repeatHandler.post(repeat)
+            } else {
+                startFallbackTone()
+            }
+        }
+
+        vibrator = getSystemService(Vibrator::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            vibrator?.vibrate(
+                VibrationEffect.createWaveform(longArrayOf(0, 1100, 300, 1100, 650), 0),
+            )
+        }
+    }
+
+    private fun startFallbackTone() {
         val alarmUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
             ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
         if (alarmUri != null) {
@@ -105,12 +159,6 @@ class MedicationAlarmService : Service() {
             }
         }
 
-        vibrator = getSystemService(Vibrator::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator?.vibrate(
-                VibrationEffect.createWaveform(longArrayOf(0, 1100, 300, 1100, 650), 0),
-            )
-        }
     }
 
     private fun buildNotification(alarm: MedicationAlarm): Notification {
@@ -129,7 +177,9 @@ class MedicationAlarmService : Service() {
         val openApp = PendingIntent.getActivity(
             this,
             alarm.id,
-            Intent(this, MainActivity::class.java),
+            alarm.putIn(Intent(this, MainActivity::class.java)
+                .setAction(ACTION_OPEN_ALARM)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
@@ -138,7 +188,8 @@ class MedicationAlarmService : Service() {
             .setContentTitle("Medication alarm is ringing")
             .setContentText("${alarm.title} · ${alarm.body}")
             .setContentIntent(openApp)
-            .setCategory(Notification.CATEGORY_SERVICE)
+            .setCategory(Notification.CATEGORY_ALARM)
+            .setFullScreenIntent(openApp, true)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
@@ -191,7 +242,7 @@ class MedicationAlarmService : Service() {
                 NotificationChannel(
                     CHANNEL_ID,
                     "Active medication alarm",
-                    NotificationManager.IMPORTANCE_LOW,
+                    NotificationManager.IMPORTANCE_HIGH,
                 ).apply {
                     description = "Silent service controls while a medication alarm rings"
                     setSound(null, null)
@@ -210,6 +261,11 @@ class MedicationAlarmService : Service() {
     }
 
     private fun stopPlayback() {
+        repeatSpeech?.let(repeatHandler::removeCallbacks)
+        repeatSpeech = null
+        speaker?.stop()
+        speaker?.shutdown()
+        speaker = null
         player?.let { mediaPlayer ->
             runCatching { if (mediaPlayer.isPlaying) mediaPlayer.stop() }
             mediaPlayer.reset()
@@ -256,8 +312,9 @@ class MedicationAlarmService : Service() {
         const val ACTION_STOP = "com.matech.medisense.action.STOP_ALARM"
         const val ACTION_SNOOZE = "com.matech.medisense.action.SNOOZE_ALARM"
         const val ACTION_MARK_TAKEN = "com.matech.medisense.action.MARK_TAKEN"
+        const val ACTION_OPEN_ALARM = "com.matech.medisense.action.OPEN_ALARM"
 
-        private const val CHANNEL_ID = "medication_alarm_service"
+        private const val CHANNEL_ID = "medication_alarm_screen"
         private const val NOTIFICATION_ID = 72940
         private const val SERVICE_PREFS = "medisense_alarm_service"
         private const val ACTIVE_ALARM = "active_alarm"

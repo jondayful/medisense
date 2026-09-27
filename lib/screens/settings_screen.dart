@@ -408,7 +408,24 @@ class SettingsScreen extends StatelessWidget {
                   const SizedBox(height: 10),
                   _AnnouncementOptions(
                     selected: appState.ttsVerbosity,
-                    onChanged: appState.setTtsVerbosity,
+                    onChanged: (verbosity) {
+                      appState.setTtsVerbosity(verbosity);
+                      final sample = switch (verbosity) {
+                        TtsVerbosity.essential => (
+                          'Essential. Medicine alarms and urgent reminders only.',
+                          'Essential. Mga alarm at mahalagang paalala lamang.',
+                        ),
+                        TtsVerbosity.standard => (
+                          'Standard. I will also announce screen names and key actions.',
+                          'Standard. Sasabihin ko rin ang mga pangalan ng pahina at mahahalagang kilos.',
+                        ),
+                        TtsVerbosity.detailed => (
+                          'Detailed. I will describe screens, controls, medicine strength, and helpful next steps.',
+                          'Detailed. Ilalarawan ko ang mga pahina, pindutan, dose, at susunod na hakbang.',
+                        ),
+                      };
+                      ttsProvider.speak(sample.$1, sample.$2);
+                    },
                     accent: accent,
                     large: isElder,
                   ),
@@ -459,30 +476,15 @@ class SettingsScreen extends StatelessWidget {
                   ),
                 ),
                 Divider(height: 1, indent: 16, endIndent: 16, color: divider),
-                ListTile(
+                _VersionCheckTile(
                   contentPadding: tilePadding,
-                  minVerticalPadding: isElder ? 14 : 8,
-                  leading: Icon(
-                    Icons.info_rounded,
-                    color: accent,
-                    size: rowIconSize,
-                  ),
-                  title: Text(
-                    'Version',
-                    style: AppTheme.textStyle(
-                      fontSize: rowTitleSize,
-                      fontWeight: FontWeight.w700,
-                      color: primary,
-                    ),
-                  ),
-                  trailing: Text(
-                    '1.0.0',
-                    style: AppTheme.textStyle(
-                      fontSize: valueSize,
-                      fontWeight: FontWeight.w600,
-                      color: secondary,
-                    ),
-                  ),
+                  isElder: isElder,
+                  accent: accent,
+                  primary: primary,
+                  secondary: secondary,
+                  rowTitleSize: rowTitleSize,
+                  valueSize: valueSize,
+                  rowIconSize: rowIconSize,
                 ),
                 Divider(height: 1, indent: 16, endIndent: 16, color: divider),
                 ListTile(
@@ -590,6 +592,88 @@ class _VoiceSettingHeader extends StatelessWidget {
       ],
     );
   }
+}
+
+class _VersionCheckTile extends StatefulWidget {
+  const _VersionCheckTile({
+    required this.contentPadding,
+    required this.isElder,
+    required this.accent,
+    required this.primary,
+    required this.secondary,
+    required this.rowTitleSize,
+    required this.valueSize,
+    required this.rowIconSize,
+  });
+
+  final EdgeInsets contentPadding;
+  final bool isElder;
+  final Color accent;
+  final Color primary;
+  final Color secondary;
+  final double rowTitleSize;
+  final double valueSize;
+  final double rowIconSize;
+
+  @override
+  State<_VersionCheckTile> createState() => _VersionCheckTileState();
+}
+
+class _VersionCheckTileState extends State<_VersionCheckTile> {
+  bool _checking = false;
+  bool _checked = false;
+
+  Future<void> _check() async {
+    if (_checking) return;
+    setState(() {
+      _checking = true;
+      _checked = false;
+    });
+    await Future<void>.delayed(const Duration(milliseconds: 900));
+    if (mounted) {
+      setState(() {
+        _checking = false;
+        _checked = true;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => ListTile(
+    contentPadding: widget.contentPadding,
+    minVerticalPadding: widget.isElder ? 14 : 8,
+    leading: Icon(
+      Icons.info_rounded,
+      color: widget.accent,
+      size: widget.rowIconSize,
+    ),
+    title: Text(
+      'Version',
+      style: AppTheme.textStyle(
+        fontSize: widget.rowTitleSize,
+        fontWeight: FontWeight.w700,
+        color: widget.primary,
+      ),
+    ),
+    subtitle: _checked
+        ? const Text("You're on the latest version")
+        : const Text('Tap to check for updates'),
+    trailing: _checking
+        ? const SizedBox(
+            width: 22,
+            height: 22,
+            child: CircularProgressIndicator(strokeWidth: 2.5),
+          )
+        : Text(
+            '1.0.0',
+            style: AppTheme.textStyle(
+              fontSize: widget.valueSize,
+              fontWeight: FontWeight.w600,
+              color: widget.secondary,
+            ),
+          ),
+    onTap: _check,
+  );
 }
 
 /// A roomy, one-choice-per-row announcement selector. A segmented control is

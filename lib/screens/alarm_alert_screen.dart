@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
@@ -43,6 +44,8 @@ class _AlarmAlertScreenState extends State<AlarmAlertScreen> {
   void _startAlarmFeedback(String medicationName) {
     if (_feedbackStarted || _dismissed) return;
     _feedbackStarted = true;
+    // Android's foreground alarm service speaks even while Flutter is asleep.
+    if (Platform.isAndroid) return;
     _tts = context.read<TtsProvider>();
 
     final appState = context.read<AppStateProvider>();
@@ -53,7 +56,7 @@ class _AlarmAlertScreenState extends State<AlarmAlertScreen> {
     final greetingName = name == null || name.isEmpty ? 'there' : name;
     Future<void> announce() => _tts!.speakAlarm(
       'Hello $greetingName. Take your $medicationName now.',
-      'Hello $greetingName, inom ka na ng $medicationName ngayon.',
+      'Hello, $greetingName oras na para uminom ng $medicationName.',
     );
 
     announce();

@@ -15,6 +15,19 @@ class MedicineExpiryInfo {
 }
 
 class MedicineExpiryParser {
+  /// Manual entry is intentionally unambiguous and stricter than OCR input.
+  static DateTime? parseManual(String value) {
+    if (!RegExp(r'^\d{2}-\d{2}-\d{4}$').hasMatch(value)) return null;
+    final month = int.parse(value.substring(0, 2));
+    final day = int.parse(value.substring(3, 5));
+    final year = int.parse(value.substring(6, 10));
+    if (year < 2000 || year > 2100) return null;
+    final parsed = DateTime(year, month, day);
+    return parsed.year == year && parsed.month == month && parsed.day == day
+        ? parsed
+        : null;
+  }
+
   static final RegExp _anchor = RegExp(
     r'\b(?:exp(?:iration|iry)?|expires?|use\s*by|best\s*before)\b',
     caseSensitive: false,

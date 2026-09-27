@@ -1,81 +1,100 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:provider/provider.dart';
 
+import '../models/user.dart';
+import '../providers/auth_provider.dart';
+import '../services/supabase_sync_service.dart';
 import '../theme/app_theme.dart';
 
-/// Patient-side shortcut to review guardian invitations and connections.
-class PatientGuardianHomeCard extends StatelessWidget {
+/// Patient's current guardian connection from the Supabase pairing records.
+class PatientGuardianHomeCard extends StatefulWidget {
+  const PatientGuardianHomeCard({super.key, this.large = false});
   final bool large;
 
-  const PatientGuardianHomeCard({super.key, this.large = false});
+  @override
+  State<PatientGuardianHomeCard> createState() =>
+      _PatientGuardianHomeCardState();
+}
+
+class _PatientGuardianHomeCardState extends State<PatientGuardianHomeCard> {
+  String? _patientId;
+  Future<List<String>>? _guardians;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final auth = context.watch<AuthProvider>();
+    if (_patientId == auth.userId) return;
+    _patientId = auth.userId;
+    _guardians = _loadGuardians(auth.userId, auth.userEmail);
+  }
+
+  Future<List<String>> _loadGuardians(String id, String email) async {
+    if (id.isEmpty) return [];
+    final sync = SupabaseSyncService();
+    final pairings = await sync.fetchPairingRequests(
+      userId: id,
+      userEmail: email,
+    );
+    final accepted = pairings.where(
+      (p) => p.patientId == id && p.status == PairingStatus.accepted,
+    );
+    final names = <String>[];
+    for (final pairing in accepted) {
+      final profile = await sync.getUserProfile(pairing.guardianId);
+      final name = profile?['name']?.toString().trim();
+      names.add(name != null && name.isNotEmpty ? name : pairing.guardianEmail);
+    }
+    return names;
+  }
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final surface = AppTheme.surfaceColor(context);
-    final border = AppTheme.borderColor(context);
     final accent = AppTheme.actionColor(context);
     final primary = AppTheme.primaryTextColor(context);
     final secondary = AppTheme.secondaryTextColor(context);
-
-    return Semantics(
-      button: true,
-      label:
-          'Add your Guardian. Review invitations and connected guardians. A guardian can invite your account email.',
-      excludeSemantics: true,
-      child: Material(
-        color: surface,
-        elevation: isDark ? 0 : 2,
-        shadowColor: Colors.black.withValues(alpha: 0.08),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(24),
-          side: BorderSide(color: border),
-        ),
-        child: InkWell(
-          onTap: () => context.go('/guardian'),
-          borderRadius: BorderRadius.circular(24),
+    return FutureBuilder<List<String>>(
+      future: _guardians,
+      builder: (context, snapshot) {
+        final guardians = snapshot.data ?? const <String>[];
+        final connected = guardians.isNotEmpty;
+        return Card(
+          margin: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+            side: BorderSide(color: AppTheme.borderColor(context)),
+          ),
           child: Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: large ? 24 : 18,
-              vertical: large ? 22 : 18,
-            ),
+            padding: EdgeInsets.all(widget.large ? 24 : 18),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
                   children: [
-                    Container(
-                      width: large ? 64 : 52,
-                      height: large ? 64 : 52,
-                      decoration: BoxDecoration(
-                        color: accent.withValues(alpha: isDark ? 0.20 : 0.10),
-                        borderRadius: BorderRadius.circular(18),
-                      ),
-                      child: Icon(
-                        Icons.person_add_alt_1_rounded,
-                        color: accent,
-                        size: large ? 34 : 27,
-                      ),
+                    Icon(
+                      connected
+                          ? Icons.people_rounded
+                          : Icons.person_add_alt_1_rounded,
+                      color: accent,
+                      size: widget.large ? 36 : 28,
                     ),
-                    SizedBox(width: large ? 16 : 12),
+                    const SizedBox(width: 12),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'CARE TEAM',
-                            style: AppTheme.microLabel(
-                              fontSize: large ? 14 : 11,
-                              color: accent,
-                            ),
+                            'YOUR GUARDIAN',
+                            style: AppTheme.microLabel(color: accent),
                           ),
                           const SizedBox(height: 4),
                           Text(
-                            'Add your Guardian',
-                            softWrap: true,
+                            connected
+                                ? guardians.join(', ')
+                                : 'Add your Guardian',
                             style: AppTheme.textStyle(
-                              fontSize: large ? 24 : 18,
-                              height: 1.2,
+                              fontSize: widget.large ? 24 : 18,
                               fontWeight: FontWeight.w700,
                               color: primary,
                             ),
@@ -83,29 +102,42 @@ class PatientGuardianHomeCard extends StatelessWidget {
                         ],
                       ),
                     ),
-                    SizedBox(width: large ? 8 : 4),
-                    Icon(
-                      Icons.chevron_right_rounded,
-                      color: accent,
-                      size: large ? 32 : 26,
-                    ),
                   ],
                 ),
-                SizedBox(height: large ? 16 : 12),
+                const SizedBox(height: 12),
                 Text(
-                  'Review invitations and connected guardians. A guardian can invite your account email.',
-                  softWrap: true,
+                  connected
+                      ? 'Connected to your care team.'
+                      : snapshot.hasError
+                      ? 'Connection unavailable. Manage guardians to retry.'
+                      : 'Review invitations and connected guardians.',
                   style: AppTheme.textStyle(
-                    fontSize: large ? 19 : 14,
-                    height: 1.4,
+                    fontSize: widget.large ? 18 : 14,
                     color: secondary,
                   ),
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    await context.push('/guardian');
+                    if (mounted && _patientId != null) {
+                      final auth = this.context.read<AuthProvider>();
+                      setState(
+                        () => _guardians = _loadGuardians(
+                          _patientId!,
+                          auth.userEmail,
+                        ),
+                      );
+                    }
+                  },
+                  icon: const Icon(Icons.manage_accounts_rounded),
+                  label: const Text('Manage Guardian'),
                 ),
               ],
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }

@@ -49,6 +49,9 @@ class _GuardianHomeCardState extends State<GuardianHomeCard> {
         userId: widget.guardianId,
         userEmail: '',
       );
+      // Supabase is authoritative. A revoked local pairing must not continue
+      // to select another patient's medication on the home card.
+      pairingsById.clear();
       for (final pairing in remotePairings) {
         pairingsById[pairing.id] = pairing;
         await db.insertPairing(pairing);
@@ -56,14 +59,18 @@ class _GuardianHomeCardState extends State<GuardianHomeCard> {
     } catch (error) {
       debugPrint('GuardianHome: could not refresh pairings - $error');
     }
-    final pairings = pairingsById.values
-        .where((pairing) => pairing.status == PairingStatus.accepted)
-        .toList();
+    final pairings =
+        pairingsById.values
+            .where((pairing) => pairing.status == PairingStatus.accepted)
+            .toList()
+          ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     if (pairings.isEmpty) return const _GuardianHomeSummary();
 
     final pairing = pairings.first;
-    final patient = await db.getUser(pairing.patientEmail);
-    final rawName = patient?['full_name']?.toString().trim();
+    final profile = await SupabaseSyncService().getUserProfile(
+      pairing.patientId,
+    );
+    final rawName = profile?['name']?.toString().trim();
     final name = rawName == null || rawName.isEmpty
         ? pairing.patientEmail
               .split('@')

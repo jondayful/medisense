@@ -86,3 +86,5 @@ app.*.map.json
 
 # Downloaded source CSV; the compressed, generated catalog is tracked instead.
 /tooling/ph_fda_drug_products.csv
+PRODUCT.md
+.impeccable/config.json

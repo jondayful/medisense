@@ -10,6 +10,7 @@ import '../models/scheduled_dose.dart';
 import '../widgets/pill_tile.dart';
 import '../providers/auth_provider.dart';
 import '../providers/tts_provider.dart';
+import '../providers/voice_navigation_provider.dart';
 import '../providers/app_state_provider.dart';
 import '../models/accessibility_mode.dart';
 import '../widgets/elder_bottom_nav.dart';
@@ -131,14 +132,18 @@ class _MediScheduleScreenState extends State<MediScheduleScreen>
           appState.savedUserName,
           appState.onboardingName,
         ]);
-        tts.speak(
-          name == null
-              ? 'Here is your medication schedule.'
-              : 'Hello $name, here is your medication schedule.',
-          name == null
-              ? 'Narito ang iskedyul ng iyong mga gamot.'
-              : 'Kumusta, $name. Narito ang iskedyul ng iyong mga gamot.',
-        );
+        if (appState.ttsVerbosity == TtsVerbosity.detailed) {
+          context.read<VoiceNavigationProvider>().readCurrentScreen();
+        } else {
+          tts.speak(
+            name == null
+                ? 'Here is your medication schedule.'
+                : 'Hello $name, here is your medication schedule.',
+            name == null
+                ? 'Narito ang iskedyul ng iyong mga gamot.'
+                : 'Kumusta, $name. Narito ang iskedyul ng iyong mga gamot.',
+          );
+        }
       }
       _hasGreeted = true;
     }

@@ -93,6 +93,13 @@ class NotificationProvider extends ChangeNotifier {
       final medicationId = action['medicationId'] as String?;
       final scheduleId = action['scheduleId'] as String?;
       if (medicationId == null || scheduleId == null) return null;
+      if (action['type'] == 'open') {
+        _router?.go(
+          '/alarm',
+          extra: {'medicationId': medicationId, 'scheduleId': scheduleId},
+        );
+        return null;
+      }
       await _persistMarkTakenAction(medicationId, scheduleId);
       if (_medicationProvider != null) await resolvePendingAction();
       return null;
@@ -153,7 +160,19 @@ class NotificationProvider extends ChangeNotifier {
       final medicationId = alarmAction?['medicationId'] as String?;
       final scheduleId = alarmAction?['scheduleId'] as String?;
       if (medicationId != null && scheduleId != null) {
-        await _persistMarkTakenAction(medicationId, scheduleId);
+        if (alarmAction?['type'] == 'open') {
+          // The router is attached after initialization; resolve on startup.
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString(
+            _kPendingActionKey,
+            jsonEncode({
+              'actionId': 'open_alarm',
+              'payload': 'med:$medicationId|sched:$scheduleId',
+            }),
+          );
+        } else {
+          await _persistMarkTakenAction(medicationId, scheduleId);
+        }
       }
       // Remove alarms created by the older notification-only implementation.
       // New Android reminders are scheduled through AlarmManager below.
@@ -199,6 +218,13 @@ class NotificationProvider extends ChangeNotifier {
           await android?.canScheduleExactNotifications() ??
           true;
       if (!exactAllowed) return false;
+
+      final fullScreenAllowed =
+          await _nativeAlarmChannel.invokeMethod<bool>(
+            'ensureFullScreenAccess',
+          ) ??
+          true;
+      if (!fullScreenAllowed) return false;
 
       return true;
     }
@@ -352,6 +378,29 @@ class NotificationProvider extends ChangeNotifier {
   }
 
   bool get isInitialized => _initialized;
+
+  /// Ring a newly received guardian reminder while the patient app is active.
+  Future<void> ringGuardianReminder({
+    required String medicationId,
+    required String scheduleId,
+    required String medicationName,
+    required String patientName,
+  }) async {
+    await _initialization;
+    if (Platform.isAndroid) {
+      await _nativeAlarmChannel.invokeMethod<void>('ringNow', {
+        'id': safeNotificationId(scheduleId),
+        'title': '$medicationName due now',
+        'body': 'Hello, $patientName oras na para uminom ng $medicationName',
+        'medicationId': medicationId,
+        'scheduleId': scheduleId,
+      });
+    }
+    _router?.go(
+      '/alarm',
+      extra: {'medicationId': medicationId, 'scheduleId': scheduleId},
+    );
+  }
 
   int safeNotificationId(String id) {
     // Hash the full schedule ID. Taking its first digits caused every dose

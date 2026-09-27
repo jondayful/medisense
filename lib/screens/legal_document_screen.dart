@@ -37,7 +37,7 @@ class LegalDocumentScreen extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              'Last updated: September 18, 2026',
+              'Last updated: September 27, 2026',
               style: AppTheme.textStyle(fontSize: 14, color: bodyColor),
             ),
             const SizedBox(height: 24),
@@ -57,7 +57,7 @@ class LegalDocumentScreen extends StatelessWidget {
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Text(
-                'This in-app draft should be reviewed by a qualified legal professional before a public release.',
+                'MediSense is a medication organization tool. Check the label and your clinician’s instructions before taking a dose.',
                 style: AppTheme.textStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.w600,
@@ -74,47 +74,75 @@ class LegalDocumentScreen extends StatelessWidget {
 
   static const _terms = <(String, String)>[
     (
-      'Using MediSense',
-      'MediSense helps you organize medicine schedules, reminders, and label scans. It is not a medical device, does not diagnose conditions, and does not replace advice from a doctor, pharmacist, or emergency service.',
+      'Who provides MediSense',
+      'MediSense is a capstone project developed by Matech for academic demonstration and testing. It is not a publicly released service. You can contact us about these Terms or your test account at support@matech.uno.',
     ),
     (
-      'Your responsibilities',
-      'Check medicine names, dosage, timing, and instructions against the original prescription and packaging before taking any medicine. Use the app only for lawful purposes and keep your account details accurate.',
+      'What MediSense provides',
+      'MediSense lets you record medication schedules, scan labels, receive reminders, and share schedule and dose activity with an accepted guardian. It does not prescribe, diagnose, verify that a medicine is safe for you, or replace a clinician, pharmacist, or emergency service.',
     ),
     (
-      'Accounts and subscriptions',
-      'You are responsible for protecting your sign-in credentials. Optional paid plans are processed through a payment provider and are activated only after payment is verified. Plan features, prices, and renewal terms are shown before checkout.',
+      'Check every medicine entry',
+      'OCR, speech recognition, and schedule suggestions can make mistakes. Compare every medicine name, strength, dose, time, and expiration date with the original packaging and your prescription before saving or taking a medicine. Do not use an expired medicine without advice from a pharmacist or clinician.',
     ),
     (
-      'Availability',
-      'We aim to keep MediSense available and accurate, but reminders, scans, network services, and voice features can fail or be unavailable. Keep another reliable record of important prescriptions and medication instructions.',
+      'Account and guardian access',
+      'Keep your sign-in details private and your account information accurate. A guardian may view your medication schedule and recorded dose activity only after you accept a pairing request. Accept requests only from people you trust. Both parties must use the app lawfully and respect the patient’s privacy.',
     ),
     (
-      'Contact',
-      'For questions about these terms, contact the MediSense project team through the support contact published with the app.',
+      'Payments',
+      'If you choose a paid plan, the price and features shown at checkout apply to that purchase. PayMongo processes payment details. A plan becomes active only after the payment is verified. Payment and refund rights also depend on the checkout terms and applicable law.',
+    ),
+    (
+      'Reminders and availability',
+      'Phone settings, battery restrictions, permissions, connectivity, and service outages may delay or prevent alarms, scans, synchronization, or guardian messages. Keep a separate reliable record of prescriptions and use another reminder method when missing a dose could be harmful.',
+    ),
+    (
+      'Inactive accounts',
+      'For a hosted version of this project, the proposed account lifecycle is 12 months of inactivity followed by a further 12-month closure period. Cloud account data would be deleted after 24 months of inactivity, subject to the Privacy Policy. Automatic account closure is not part of the current prototype.',
+    ),
+    (
+      'Governing law',
+      'These Terms are governed by the laws of the Philippines, subject to any mandatory rights you have under applicable law.',
+    ),
+    (
+      'Changes and questions',
+      'We may update these Terms when the service changes and will show the current version in the app. For questions or account assistance, email support@matech.uno.',
     ),
   ];
 
   static const _privacy = <(String, String)>[
     (
-      'Information we handle',
-      'MediSense may handle your profile name, email address, accessibility preferences, medication schedules, reminder history, and label scan results. Voice commands and images are used only to provide the feature you request.',
+      'Who is responsible',
+      'Matech develops MediSense as a capstone project for academic demonstration and testing. This policy explains the data the prototype may process when its features are used. For privacy questions or requests, email support@matech.uno.',
     ),
     (
-      'How information is used',
-      'We use this information to sign you in, save your schedule, show reminders, provide accessibility features, and improve the reliability of the app. We do not sell personal information.',
+      'Data MediSense uses',
+      'Your account name, email, role, guardian pairings, medication names, strengths, schedules, expiration dates, and dose timestamps support the features you choose. The app also stores accessibility, voice, and alarm preferences on your device. Medication and dose records can reveal sensitive health information.',
     ),
     (
-      'Storage and service providers',
-      'Account and schedule data can be stored using Supabase services. Google Sign-In may be used to authenticate your account. If you choose a paid plan, PayMongo processes payment information; MediSense does not store card or e-wallet credentials.',
+      'Why data is used and shared',
+      'We use account data to sign you in, medication data to maintain schedules and alarms, and dose timestamps to show when a dose was marked taken. When you accept a guardian pairing, that guardian can view your synced medication and dose activity and can send reminders. We do not sell personal information or use medication data for advertising.',
     ),
     (
-      'Your choices',
-      'You can change accessibility and voice preferences in Settings. You can remove local data by uninstalling the app and may request account-data help through the support contact published with the app.',
+      'Scanning and voice',
+      'The camera captures label images for text recognition. On-device ML Kit is used for local OCR; when cloud recognition is configured and used, the captured image is sent to Google Cloud Vision for text extraction. Offline Vosk processes voice commands on the device. Device text-to-speech speaks reminders. Review scan results before saving.',
+    ),
+    (
+      'Service providers and storage',
+      'Supabase stores account profiles, synced medication schedules, pairings, guardian reminders, and dose logs. Google Sign-In may authenticate an account. PayMongo handles optional payments; MediSense does not store card or e-wallet credentials. Local device storage keeps a working copy so the app can operate and retry synchronization.',
+    ),
+    (
+      'Your controls and rights',
+      'You can change voice and accessibility settings, stop sharing by managing guardian pairings, and remove local app data by uninstalling. Uninstalling does not automatically erase synced cloud records. To request access, correction, deletion, or other applicable privacy rights, email support@matech.uno. We may verify your identity before acting on a request.',
+    ),
+    (
+      'Inactive account retention',
+      'For a hosted version of this project, the proposed cloud-data retention period is 24 months after the last account activity: 12 months of inactivity, followed by a further 12-month closure period. At the end of that period, the intended process is to delete the cloud profile, medication schedules, guardian pairings, reminders, and dose records, except data that must be kept for a legal obligation or legitimate legal claim. The current prototype does not automatically track inactivity or close accounts. Data stored on your device may remain until you clear app data or uninstall the app.',
     ),
     (
       'Security',
-      'We use reasonable safeguards, but no internet service can guarantee absolute security. Do not share your account password or payment details with anyone.',
+      'Account access uses Supabase authentication and row-level access rules for patient and accepted-guardian records. Network transmission uses encrypted connections. No internet service can promise absolute security. Report a suspected privacy or security issue to support@matech.uno.',
     ),
   ];
 }

@@ -276,10 +276,39 @@ class SupabaseSyncService {
     if (uuid == null) return const [];
     final rows = await SupabaseService.client
         .from('care_reminders')
-        .select('id, medication_id, schedule_id, created_at')
+        .select('id, guardian_id, medication_id, schedule_id, created_at')
         .eq('patient_id', uuid)
         .order('created_at', ascending: false)
         .limit(5)
+        .timeout(const Duration(seconds: 10));
+    final reminders = rows
+        .map((row) => Map<String, dynamic>.from(row))
+        .toList();
+    final names = <String, String>{};
+    for (final reminder in reminders) {
+      final guardianId = reminder['guardian_id']?.toString();
+      if (guardianId == null || guardianId.isEmpty) continue;
+      if (!names.containsKey(guardianId)) {
+        final profile = await getUserProfile(guardianId);
+        names[guardianId] = profile?['name']?.toString().trim() ?? 'Guardian';
+      }
+      reminder['guardian_name'] = names[guardianId];
+    }
+    return reminders;
+  }
+
+  /// Lightweight foreground check; only the visible card fetches names.
+  Future<List<Map<String, dynamic>>> fetchRecentCareReminderIds(
+    String patientId,
+  ) async {
+    final uuid = nullableUuid(patientId);
+    if (uuid == null) return const [];
+    final rows = await SupabaseService.client
+        .from('care_reminders')
+        .select('id, medication_id, schedule_id')
+        .eq('patient_id', uuid)
+        .order('created_at', ascending: false)
+        .limit(10)
         .timeout(const Duration(seconds: 10));
     return rows.map((row) => Map<String, dynamic>.from(row)).toList();
   }

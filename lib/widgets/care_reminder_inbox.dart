@@ -41,7 +41,9 @@ class _CareReminderInboxState extends State<CareReminderInbox>
   @override
   void didUpdateWidget(covariant CareReminderInbox oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.patientId != oldWidget.patientId) _refresh();
+    if (widget.patientId != oldWidget.patientId) {
+      _refresh();
+    }
   }
 
   @override
@@ -115,7 +117,7 @@ class _CareReminderInboxState extends State<CareReminderInbox>
                   const SizedBox(width: 9),
                   Expanded(
                     child: Text(
-                      'Care team reminders',
+                      'Guardian reminders',
                       style: AppTheme.textStyle(
                         fontSize: widget.large ? 21 : 16,
                         fontWeight: FontWeight.w700,
@@ -128,28 +130,22 @@ class _CareReminderInboxState extends State<CareReminderInbox>
               const SizedBox(height: 8),
               ...snapshot.data!.take(3).map((reminder) {
                 final medId = reminder['medication_id']?.toString();
-                final scheduleId = reminder['schedule_id']?.toString();
                 final matches = meds.where((med) => med.id == medId);
                 final med = matches.isEmpty ? null : matches.first;
-                final schedules = med?.schedule.where(
-                  (s) => s.id == scheduleId,
-                );
-                final schedule = schedules == null || schedules.isEmpty
-                    ? null
-                    : schedules.first;
+                final guardianName =
+                    reminder['guardian_name']?.toString().split(' ').first ??
+                    'Guardian';
                 final sentAt = DateTime.tryParse(
                   reminder['created_at']?.toString() ?? '',
                 )?.toLocal();
-                final detail = med == null
-                    ? 'A scheduled medication'
-                    : '${med.name}${schedule == null ? '' : ' · ${schedule.formattedTime}'}';
+                final detail = med?.name ?? 'medicine';
                 return Padding(
                   padding: const EdgeInsets.only(top: 10),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        detail,
+                        '$guardianName is reminding you.\nTake your $detail',
                         style: AppTheme.textStyle(
                           fontSize: widget.large ? 18 : 14,
                           fontWeight: FontWeight.w700,
@@ -158,8 +154,8 @@ class _CareReminderInboxState extends State<CareReminderInbox>
                       ),
                       Text(
                         sentAt == null
-                            ? 'Your guardian sent a reminder'
-                            : 'Guardian reminder · ${DateFormat.MMMd().add_jm().format(sentAt)}',
+                            ? 'Reminder received'
+                            : DateFormat.MMMd().add_jm().format(sentAt),
                         style: AppTheme.textStyle(
                           fontSize: widget.large ? 16 : 12,
                           color: muted,

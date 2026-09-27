@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
@@ -21,14 +22,34 @@ class CarePatientDashboard extends StatefulWidget {
   State<CarePatientDashboard> createState() => _CarePatientDashboardState();
 }
 
-class _CarePatientDashboardState extends State<CarePatientDashboard> {
+class _CarePatientDashboardState extends State<CarePatientDashboard>
+    with WidgetsBindingObserver {
   late Future<CareOverview> _overview;
   String? _sendingSchedule;
+  Timer? _refreshTimer;
+  final Set<String> _seenTakenEvents = {};
+  bool _hasLoaded = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _refresh();
+    _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(_refresh);
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) setState(_refresh);
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 
   @override
@@ -36,16 +57,48 @@ class _CarePatientDashboardState extends State<CarePatientDashboard> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.patientId != widget.patientId) {
       _sendingSchedule = null;
+      _seenTakenEvents.clear();
+      _hasLoaded = false;
       _refresh();
     }
   }
 
   void _refresh() {
     final sync = SupabaseSyncService();
-    _overview = Future.wait([
-      sync.fetchPatientMedications(widget.patientId),
-      sync.fetchPatientLogs(widget.patientId),
-    ]).then((result) => CareOverview.fromCloud(result[0], result[1]));
+    _overview =
+        Future.wait([
+          sync.fetchPatientMedications(widget.patientId),
+          sync.fetchPatientLogs(widget.patientId),
+        ]).then((result) {
+          final overview = CareOverview.fromCloud(result[0], result[1]);
+          final taken = overview.doses.where((dose) => dose.takenAt != null);
+          final fresh = taken.where(
+            (dose) => !_seenTakenEvents.contains(
+              '${dose.medicationId}:${dose.scheduleId}:${dose.takenAt!.millisecondsSinceEpoch}',
+            ),
+          );
+          if (_hasLoaded && fresh.isNotEmpty && mounted) {
+            final dose = fresh.first;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    '${dose.medicationName} marked taken at ${DateFormat.jm().format(dose.takenAt!)}',
+                  ),
+                ),
+              );
+            });
+          }
+          _seenTakenEvents.addAll(
+            taken.map(
+              (dose) =>
+                  '${dose.medicationId}:${dose.scheduleId}:${dose.takenAt!.millisecondsSinceEpoch}',
+            ),
+          );
+          _hasLoaded = true;
+          return overview;
+        });
   }
 
   Future<void> _sendReminder(CareDose dose) async {
