@@ -46,7 +46,14 @@ class OcrTextCleanup {
   };
 
   OcrCleanupResult clean(String source) {
-    var text = source
+    var text = source.replaceAllMapped(
+      RegExp(r'([A-Za-z]{3,})[ \t]*\r?\n[ \t]*([A-Za-z]{1,3})\b'),
+      (match) {
+        final joined = '${match[1]}${match[2]}';
+        return dictionary.contains(joined.toLowerCase()) ? joined : match[0]!;
+      },
+    );
+    text = text
         .replaceAll('\u00a0', ' ')
         .replaceAll(RegExp(r'[|]'), 'I')
         // OCR often confuses a leading capital O with zero in a drug name.

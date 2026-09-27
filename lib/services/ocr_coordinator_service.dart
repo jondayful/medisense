@@ -8,6 +8,7 @@ import 'cloud_vision_service.dart';
 import 'medication_database_service.dart';
 import 'medicine_label_parser.dart';
 import 'ocr_coordinator_exceptions.dart';
+import 'ocr_text_cleanup.dart';
 
 enum OcrResultSource { onDeviceMlKit, cloudVision }
 
@@ -188,12 +189,15 @@ class OcrCoordinatorService {
 
   Future<_Assessment> _assess(String rawText, {bool labelFirst = false}) async {
     if (rawText.trim().isEmpty) return _Assessment.empty(rawText);
+    final cleanedText = const OcrTextCleanup().clean(rawText).text;
 
     final allStructured = labelFirst
         ? const <ParsedMedicine>[]
-        : parser.parseAllStructured(rawText);
+        : parser.parseAllStructured(cleanedText);
     final fallback = allStructured.isEmpty
-        ? parser.parseStructured(rawText)
+        ? labelFirst
+              ? parser.parsePackageStructured(cleanedText)
+              : parser.parseStructured(cleanedText)
         : null;
     final medicines = allStructured.isNotEmpty
         ? allStructured

@@ -551,6 +551,67 @@ class ScanResultStabilityGate {
   }
 }
 
+/// Keeps strength evidence from the preview frames leading to one still
+/// capture. It never chooses a dose; disagreement asks for manual review.
+class ScanPreviewEvidence {
+  ScanPreviewEvidence._(this._reads, this._conflictingNames);
+
+  ScanPreviewEvidence() : _reads = [], _conflictingNames = <String>{};
+
+  final List<({String name, String strength})> _reads;
+  final Set<String> _conflictingNames;
+
+  void observe(Iterable<PrescriptionItem> items) {
+    final byName = <String, Set<String>>{};
+    for (final item in items) {
+      final name = item.drugName
+          .toLowerCase()
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .trim();
+      final strength = item.strength.toLowerCase().replaceAll(
+        RegExp(r'\s+'),
+        '',
+      );
+      if (name.isEmpty || strength.isEmpty) continue;
+      byName.putIfAbsent(name, () => <String>{}).add(strength);
+      _reads.add((name: name, strength: strength));
+    }
+    for (final entry in byName.entries) {
+      if (entry.value.length > 1) _conflictingNames.add(entry.key);
+    }
+    if (_reads.length > 10) _reads.removeRange(0, _reads.length - 10);
+  }
+
+  ScanPreviewEvidence snapshotAndReset() {
+    final snapshot = ScanPreviewEvidence._(
+      List.of(_reads),
+      Set.of(_conflictingNames),
+    );
+    _reads.clear();
+    _conflictingNames.clear();
+    return snapshot;
+  }
+
+  bool conflictsWith(MedicineLabelResult result) {
+    final name = result.name
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (_conflictingNames.contains(name)) return true;
+    final strengths = _reads
+        .where((read) => read.name == name)
+        .map((read) => read.strength)
+        .toList();
+    if (strengths.length < 2) return false;
+    final finalStrength = result.dosage.toLowerCase().replaceAll(
+      RegExp(r'\s+'),
+      '',
+    );
+    return strengths.toSet().length > 1 ||
+        (finalStrength.isNotEmpty && strengths.first != finalStrength);
+  }
+}
+
 /// Optional platform AI seam. The default implementation is intentionally a
 /// no-op: unsupported Gemini Nano/Apple devices must never block scanning.
 abstract class OptionalScanAiEnhancer {

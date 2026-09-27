@@ -4,6 +4,8 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import '../models/medication.dart';
 import '../data/database_helper.dart';
 import '../services/supabase_sync_service.dart';
+import '../services/greeting_name.dart';
+import '../services/medication_alarm_message.dart';
 import 'notification_provider.dart';
 import 'app_state_provider.dart';
 
@@ -41,6 +43,7 @@ class MedicationProvider extends ChangeNotifier {
   AppStateProvider? _appStateProvider;
   bool _syncingAlarmSchedules = false;
   bool? _lastObservedAlarmEnabled;
+  String? _lastAlarmGreeting;
   Future<void> _doseStatusQueue = Future<void>.value();
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   Future<void>? _activeOutboxDrain;
@@ -58,8 +61,14 @@ class MedicationProvider extends ChangeNotifier {
   void updateAppStateProvider(AppStateProvider? provider) {
     _appStateProvider = provider;
     final enabled = _notificationsEnabled;
-    if (_lastObservedAlarmEnabled != enabled) {
+    final greeting = resolveGreetingName([
+      provider?.savedUserName,
+      provider?.onboardingName,
+    ]);
+    if (_lastObservedAlarmEnabled != enabled ||
+        _lastAlarmGreeting != greeting) {
       _lastObservedAlarmEnabled = enabled;
+      _lastAlarmGreeting = greeting;
       if (_medications.isNotEmpty) unawaited(syncMedicationAlarms());
     }
   }
@@ -205,8 +214,13 @@ class MedicationProvider extends ChangeNotifier {
               {
                 'id': notifications.safeNotificationId(schedule.id),
                 'title': '${medication.name} due now',
-                'body':
-                    'Hello, ${_appStateProvider?.savedUserName ?? _appStateProvider?.onboardingName ?? 'kaibigan'} oras na para uminom ng ${medication.name}',
+                'body': medicationAlarmMessage(
+                  name: resolveGreetingName([
+                    _appStateProvider?.savedUserName,
+                    _appStateProvider?.onboardingName,
+                  ]),
+                  medicineName: medication.name,
+                ),
                 'time': schedule.time,
                 'medicationId': medication.id,
                 'scheduleId': schedule.id,

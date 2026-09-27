@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest.dart' as tz_data;
 import '../data/database_helper.dart';
+import '../services/medication_alarm_message.dart';
 import 'medication_provider.dart';
 import 'tts_provider.dart';
 
@@ -391,7 +392,10 @@ class NotificationProvider extends ChangeNotifier {
       await _nativeAlarmChannel.invokeMethod<void>('ringNow', {
         'id': safeNotificationId(scheduleId),
         'title': '$medicationName due now',
-        'body': 'Hello, $patientName oras na para uminom ng $medicationName',
+        'body': medicationAlarmMessage(
+          name: patientName,
+          medicineName: medicationName,
+        ),
         'medicationId': medicationId,
         'scheduleId': scheduleId,
       });

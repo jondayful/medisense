@@ -12,12 +12,14 @@ import android.media.AudioManager
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.RingtoneManager
+import android.media.ToneGenerator
 import android.os.Build
 import android.os.IBinder
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.os.VibrationEffect
 import android.os.Vibrator
 import org.json.JSONObject
@@ -25,12 +27,15 @@ import java.util.Locale
 
 class MedicationAlarmService : Service() {
     private var player: MediaPlayer? = null
+    private var generatedTone: ToneGenerator? = null
     private var vibrator: Vibrator? = null
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
     private var speaker: TextToSpeech? = null
     private val repeatHandler = Handler(Looper.getMainLooper())
     private var repeatSpeech: Runnable? = null
+    private var repeatTone: Runnable? = null
+    private var speechActive = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -71,8 +76,10 @@ class MedicationAlarmService : Service() {
     private fun startAlarmSoundAndVibration(alarm: MedicationAlarm) {
         stopPlayback()
 
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        boostAlarmVolume()
+        startAlarmTone(alarm.id)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
             audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
                 .setAudioAttributes(
                     AudioAttributes.Builder()
@@ -100,6 +107,19 @@ class MedicationAlarmService : Service() {
                     language == TextToSpeech.LANG_NOT_SUPPORTED) {
                     speaker?.language = Locale.US
                 }
+                speaker?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String) {
+                        repeatHandler.post { setSpeechActive(alarm.id, true) }
+                    }
+
+                    override fun onDone(utteranceId: String) {
+                        repeatHandler.post { setSpeechActive(alarm.id, false) }
+                    }
+
+                    override fun onError(utteranceId: String) {
+                        repeatHandler.post { setSpeechActive(alarm.id, false) }
+                    }
+                })
                 val repeat = object : Runnable {
                     override fun run() {
                         if (currentAlarmId != alarm.id) return
@@ -109,17 +129,12 @@ class MedicationAlarmService : Service() {
                             Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1f) },
                             "dose-${alarm.id}",
                         ) ?: TextToSpeech.ERROR
-                        if (spoken == TextToSpeech.ERROR) {
-                            startFallbackTone()
-                            return
-                        }
-                        repeatHandler.postDelayed(this, 9000)
+                        if (spoken == TextToSpeech.ERROR) setSpeechActive(alarm.id, false)
+                        repeatHandler.postDelayed(this, 12000)
                     }
                 }
                 repeatSpeech = repeat
                 repeatHandler.post(repeat)
-            } else {
-                startFallbackTone()
             }
         }
 
@@ -131,34 +146,96 @@ class MedicationAlarmService : Service() {
         }
     }
 
-    private fun startFallbackTone() {
+    private fun startAlarmTone(alarmId: Int) {
         val alarmUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
             ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-        if (alarmUri != null) {
+        if (alarmUri == null) {
+            startGeneratedTone(alarmId)
+            return
+        }
+        val mediaPlayer = MediaPlayer()
+        player = mediaPlayer
+        runCatching {
+            mediaPlayer.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ALARM)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build(),
+            )
+            mediaPlayer.setWakeMode(this, android.os.PowerManager.PARTIAL_WAKE_LOCK)
+            mediaPlayer.isLooping = true
+            mediaPlayer.setDataSource(this, alarmUri)
+            mediaPlayer.setOnPreparedListener {
+                if (currentAlarmId == alarmId && player === it) {
+                    it.setVolume(if (speechActive) 0.15f else 1f, if (speechActive) 0.15f else 1f)
+                    it.start()
+                }
+            }
+            mediaPlayer.setOnErrorListener { failedPlayer, _, _ ->
+                if (player === failedPlayer) player = null
+                failedPlayer.release()
+                if (currentAlarmId == alarmId) startGeneratedTone(alarmId)
+                true
+            }
+            mediaPlayer.prepareAsync()
+        }.onFailure {
+            if (player === mediaPlayer) player = null
+            mediaPlayer.release()
+            startGeneratedTone(alarmId)
+        }
+    }
+
+    private fun startGeneratedTone(alarmId: Int) {
+        if (generatedTone != null) return
+        generatedTone = runCatching { ToneGenerator(AudioManager.STREAM_ALARM, 100) }.getOrNull()
+        val repeat = object : Runnable {
+            override fun run() {
+                if (currentAlarmId != alarmId) return
+                if (!speechActive) {
+                    runCatching { generatedTone?.startTone(ToneGenerator.TONE_DTMF_0, 650) }
+                }
+                repeatHandler.postDelayed(this, 1800)
+            }
+        }
+        repeatTone = repeat
+        repeatHandler.post(repeat)
+    }
+
+    private fun setSpeechActive(alarmId: Int, active: Boolean) {
+        if (currentAlarmId != alarmId) return
+        speechActive = active
+        val level = if (active) 0.15f else 1f
+        runCatching { player?.setVolume(level, level) }
+    }
+
+    private fun boostAlarmVolume() {
+        val manager = audioManager ?: return
+        if (manager.isVolumeFixed) return
+        runCatching {
+            val prefs = getSharedPreferences(SERVICE_PREFS, Context.MODE_PRIVATE)
+            val current = manager.getStreamVolume(AudioManager.STREAM_ALARM)
+            val maximum = manager.getStreamMaxVolume(AudioManager.STREAM_ALARM)
+            if (current >= maximum) return
+            val original = prefs.getInt(PREVIOUS_ALARM_VOLUME, current)
+            manager.setStreamVolume(AudioManager.STREAM_ALARM, maximum, 0)
+            prefs.edit().putInt(PREVIOUS_ALARM_VOLUME, original).apply()
+        }
+    }
+
+    private fun restoreAlarmVolume() {
+        val prefs = getSharedPreferences(SERVICE_PREFS, Context.MODE_PRIVATE)
+        val original = prefs.getInt(PREVIOUS_ALARM_VOLUME, -1)
+        if (original < 0) return
+        val manager = audioManager ?: getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        if (manager != null && !manager.isVolumeFixed) {
             runCatching {
-                MediaPlayer().also { mediaPlayer ->
-                    mediaPlayer.setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_ALARM)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                            .build(),
-                    )
-                    mediaPlayer.setWakeMode(this, android.os.PowerManager.PARTIAL_WAKE_LOCK)
-                    mediaPlayer.isLooping = true
-                    mediaPlayer.setVolume(1f, 1f)
-                    mediaPlayer.setDataSource(this, alarmUri)
-                    mediaPlayer.setOnPreparedListener { it.start() }
-                    mediaPlayer.setOnErrorListener { failedPlayer, _, _ ->
-                        failedPlayer.release()
-                        if (player === failedPlayer) player = null
-                        true
-                    }
-                    player = mediaPlayer
-                    mediaPlayer.prepareAsync()
+                if (manager.getStreamVolume(AudioManager.STREAM_ALARM) ==
+                    manager.getStreamMaxVolume(AudioManager.STREAM_ALARM)) {
+                    manager.setStreamVolume(AudioManager.STREAM_ALARM, original, 0)
                 }
             }
         }
-
+        prefs.edit().remove(PREVIOUS_ALARM_VOLUME).apply()
     }
 
     private fun buildNotification(alarm: MedicationAlarm): Notification {
@@ -255,6 +332,7 @@ class MedicationAlarmService : Service() {
 
     private fun stopAlarm() {
         clearActiveAlarm()
+        currentAlarmId = null
         stopPlayback()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -263,6 +341,9 @@ class MedicationAlarmService : Service() {
     private fun stopPlayback() {
         repeatSpeech?.let(repeatHandler::removeCallbacks)
         repeatSpeech = null
+        repeatTone?.let(repeatHandler::removeCallbacks)
+        repeatTone = null
+        speechActive = false
         speaker?.stop()
         speaker?.shutdown()
         speaker = null
@@ -272,12 +353,16 @@ class MedicationAlarmService : Service() {
             mediaPlayer.release()
         }
         player = null
+        generatedTone?.stopTone()
+        generatedTone?.release()
+        generatedTone = null
         vibrator?.cancel()
         vibrator = null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             audioFocusRequest?.let { audioManager?.abandonAudioFocusRequest(it) }
         }
         audioFocusRequest = null
+        restoreAlarmVolume()
         audioManager = null
     }
 
@@ -318,6 +403,7 @@ class MedicationAlarmService : Service() {
         private const val NOTIFICATION_ID = 72940
         private const val SERVICE_PREFS = "medisense_alarm_service"
         private const val ACTIVE_ALARM = "active_alarm"
+        private const val PREVIOUS_ALARM_VOLUME = "previous_alarm_volume"
         private const val REQUEST_SNOOZE = 0x1357
         private const val REQUEST_STOP = 0x2468
         private const val REQUEST_TAKEN = 0x369c

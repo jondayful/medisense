@@ -10,6 +10,7 @@ import '../providers/notification_provider.dart';
 import '../providers/tts_provider.dart';
 import '../providers/app_state_provider.dart';
 import '../providers/auth_provider.dart';
+import '../services/medication_alarm_message.dart';
 import '../theme/app_theme.dart';
 
 class AlarmAlertScreen extends StatefulWidget {
@@ -53,11 +54,11 @@ class _AlarmAlertScreenState extends State<AlarmAlertScreen> {
     final name = auth.isLoggedIn
         ? auth.userName.trim()
         : appState.onboardingName?.trim();
-    final greetingName = name == null || name.isEmpty ? 'there' : name;
-    Future<void> announce() => _tts!.speakAlarm(
-      'Hello $greetingName. Take your $medicationName now.',
-      'Hello, $greetingName oras na para uminom ng $medicationName.',
+    final message = medicationAlarmMessage(
+      name: name,
+      medicineName: medicationName,
     );
+    Future<void> announce() => _tts!.speakAlarm(message, message);
 
     announce();
     _announcementTimer = Timer.periodic(

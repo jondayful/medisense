@@ -242,6 +242,14 @@ class MedicineLabelParser {
     r'\b\d+(?:[.,]\d+)?\s*(?:mg|ml|mcg|g)\b(?:\s*/\s*\d+(?:[.,]\d+)?\s*(?:mg|ml|mcg|g)\b)?',
     caseSensitive: false,
   );
+  static final RegExp _packagingMetadataLine = RegExp(
+    r'^\s*(?:batch\s*(?:no\.?|number)?|lot\s*(?:no\.?|number)?|mfg\.?|manufactur(?:ed|ing)\s*date|exp(?:\.?|iry|iration)?\s*(?:date)?|drp[-\s]?\d+)\b',
+    caseSensitive: false,
+  );
+  static final RegExp _therapeuticClassLine = RegExp(
+    r'^\s*(?:analgesic|antipyretic|anti[-\s]?inflammatory|anilide)(?:[\s/(),-]+(?:analgesic|antipyretic|anti[-\s]?inflammatory|anilide))*[\s/(),-]*$',
+    caseSensitive: false,
+  );
   static final RegExp _parentheticalBrandPair = RegExp(
     r'\b[A-Za-z][A-Za-z0-9 -]{2,}\s*\([^)]{2,}\)',
   );
@@ -952,6 +960,10 @@ class MedicineLabelParser {
     'lot',
     'batch',
     'manufactured',
+    'analgesic',
+    'antipyretic',
+    'antiinflammatory',
+    'anilide',
   };
 
   static const Set<String> _nonMedicineSignals = {
@@ -1244,6 +1256,60 @@ class MedicineLabelParser {
     return result == null ? null : _toParsedMedicine(result);
   }
 
+  /// A package has one medicine identity even when its label repeats around
+  /// several pockets. Conflicting printed strengths require manual review.
+  MedicineLabelResult? parsePackage(String rawText) {
+    final result = parse(rawText);
+    final items = _dedupePrescriptionItems(parsePrescriptionItems(rawText));
+    if (items.isEmpty) return result;
+    final identities = items
+        .map((item) => _medicineIdentity(item.drugName))
+        .toSet();
+    if (identities.length != 1) return result;
+    final strengths = items
+        .map(
+          (item) => item.strength.toLowerCase().replaceAll(RegExp(r'\s+'), ''),
+        )
+        .toSet();
+    if (strengths.length == 1) {
+      if (result != null &&
+          _medicineIdentity(result.name) == identities.single &&
+          result.dosage.toLowerCase().replaceAll(RegExp(r'\s+'), '') ==
+              strengths.single) {
+        return result;
+      }
+      final item = items.first;
+      return MedicineLabelResult(
+        name: item.drugName,
+        dosage: item.strength,
+        confidence: (result?.confidence ?? 0.72).clamp(0.0, 0.72),
+        nameConfidence: (result?.nameConfidence ?? 0.70).clamp(0.0, 0.72),
+        dosageConfidence: 0.85,
+        rawText: rawText,
+        source: ScanSource.ocr,
+      );
+    }
+    final name =
+        result != null && _medicineIdentity(result.name) == identities.single
+        ? result.name
+        : items.first.drugName;
+    return MedicineLabelResult(
+      name: name,
+      dosage: '',
+      confidence: (result?.confidence ?? 0.7).clamp(0.0, 0.74),
+      nameConfidence: result?.nameConfidence ?? 0.7,
+      dosageConfidence: 0,
+      rawText: rawText,
+      source: result?.source ?? ScanSource.ocr,
+      strengthConflict: true,
+    );
+  }
+
+  ParsedMedicine? parsePackageStructured(String rawText) {
+    final result = parsePackage(rawText);
+    return result == null ? null : _toParsedMedicine(result);
+  }
+
   /// Extracts independent structured results from multi-line text. Each row
   /// keeps only instruction lines already attached by [parseMany].
   List<ParsedMedicine> parseAllStructured(String rawText) =>
@@ -1261,7 +1327,7 @@ class MedicineLabelParser {
         items: [],
       );
     }
-    final items = parsePrescriptionItems(rawText);
+    final items = _dedupePrescriptionItems(parsePrescriptionItems(rawText));
     final hasHeader = RegExp(
       r'\b(?:prescription|medication\s+order|patient|prescriber|physician|doctor|pharmacy|rx\s*(?:no|number)?|refills?|directions|sig)\b',
       caseSensitive: false,
@@ -1270,12 +1336,16 @@ class MedicineLabelParser {
       r'\b(?:take|give|use|apply|inhale|inject|swallow|chew|tablet|capsule|qd|od|bid|bd|tid|tds|qid|prn|every\s+\d+\s*(?:hours?|days?))\b',
       caseSensitive: false,
     ).hasMatch(rawText);
-    final multipleRows = items.length >= 2;
+    final distinctNames = items
+        .map((item) => _medicineIdentity(item.drugName))
+        .toSet()
+        .length;
+    final multipleRows = distinctNames >= 2;
     final singlePrescriptionRow =
-        items.length == 1 && hasHeader && hasDirections;
+        distinctNames == 1 && hasHeader && hasDirections;
     final detected = multipleRows || singlePrescriptionRow;
     final confidence = multipleRows
-        ? (items.length >= 3 ? 0.98 : 0.93)
+        ? (distinctNames >= 3 ? 0.98 : 0.93)
         : singlePrescriptionRow
         ? 0.82
         : 0.0;
@@ -1353,7 +1423,9 @@ class MedicineLabelParser {
     // A prescription line has stronger structure than a whole-page bag of
     // words. Parse these rows first so an unfamiliar name can never be
     // replaced by an unrelated high-frequency catalog item.
-    final structuredItems = parsePrescriptionItems(normalizedText);
+    final structuredItems = _dedupePrescriptionItems(
+      parsePrescriptionItems(normalizedText),
+    );
     if (structuredItems.isNotEmpty) {
       return structuredItems
           .map(
@@ -1413,7 +1485,9 @@ class MedicineLabelParser {
     // even when they are absent from the Philippine registry. Only accept a
     // fuzzy/catalog correction when a dosage appears on the same line or its
     // attached SIG block; the extracted OCR spelling remains authoritative.
-    for (final item in parsePrescriptionItems(rawText)) {
+    for (final item in _dedupePrescriptionItems(
+      parsePrescriptionItems(rawText),
+    )) {
       final exists = candidates.any(
         (candidate) =>
             candidate.name.toLowerCase() == item.drugName.toLowerCase() &&
@@ -1453,6 +1527,7 @@ class MedicineLabelParser {
       if (strengthMatch == null) continue;
       final strength = _normalizeDosage(strengthMatch.group(0)!);
       final beforeStrength = line.substring(0, strengthMatch.start);
+      if (_packagingMetadataLine.hasMatch(beforeStrength)) continue;
       var candidateName = _cleanPrescriptionName(beforeStrength);
       var precedingNameLines = <String>[];
       if (candidateName == null) {
@@ -1464,9 +1539,11 @@ class MedicineLabelParser {
         ) {
           final priorLine = lines[previous];
           if (_prescriptionStrengthPattern.hasMatch(priorLine) ||
-              _instructionLine.hasMatch(priorLine)) {
+              _instructionLine.hasMatch(priorLine) ||
+              _packagingMetadataLine.hasMatch(priorLine)) {
             break;
           }
+          if (_therapeuticClassLine.hasMatch(priorLine)) continue;
           if (_cleanPrescriptionName(priorLine) == null) break;
           preceding.insert(0, priorLine);
         }
@@ -1510,6 +1587,20 @@ class MedicineLabelParser {
       );
     }
     return items;
+  }
+
+  List<PrescriptionItem> _dedupePrescriptionItems(
+    List<PrescriptionItem> items,
+  ) {
+    final seen = <String>{};
+    return [
+      for (final item in items)
+        if (seen.add(
+          '${item.drugName.toLowerCase()}|'
+          '${item.strength.toLowerCase().replaceAll(RegExp(r'\s+'), '')}',
+        ))
+          item,
+    ];
   }
 
   String? _normalizePrescriptionName(String? value) {
@@ -1574,6 +1665,13 @@ class MedicineLabelParser {
       '',
     );
     final cleaned = withoutDirections
+        .replaceAll(
+          RegExp(
+            r'\b(?:analgesic|antipyretic|anti[-\s]?inflammatory|anilide)\b',
+            caseSensitive: false,
+          ),
+          ' ',
+        )
         .replaceAll(
           RegExp(
             r'\b(?:rx|prescription|medication|medicine|drug|product|name)\b\s*[:#-]?',

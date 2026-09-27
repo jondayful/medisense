@@ -98,6 +98,8 @@ class _MediScanScreenState extends State<MediScanScreen>
   final ImagePreprocessor _imagePreprocessor = ImagePreprocessor();
   final OcrTextCleanup _ocrCleanup = const OcrTextCleanup();
   final ScanResultStabilityGate _scanResultGate = ScanResultStabilityGate();
+  final ScanPreviewEvidence _previewEvidence = ScanPreviewEvidence();
+  String? _pendingStrengthConflictName;
   final GlobalKey _previewAreaKey = GlobalKey();
   final GlobalKey _reticleKey = GlobalKey();
 
@@ -351,8 +353,13 @@ class _MediScanScreenState extends State<MediScanScreen>
         onCapture: _onCameraOcrCapture,
         onError: _onCameraOcrError,
         onText: (text) {
-          final layoutText = _labelParser.layoutRecognizedText(text);
+          final layoutText = _ocrCleanup
+              .clean(_labelParser.layoutRecognizedText(text))
+              .text;
           final detection = _labelParser.detectPrescriptionDocument(layoutText);
+          if (!detection.isPrescription) {
+            _previewEvidence.observe(detection.items);
+          }
           // Require actual prescription structure. Density or a generic
           // heading alone is common on medicine packaging and should not
           // divert the normal package-label scan into full-page OCR.
@@ -589,6 +596,7 @@ class _MediScanScreenState extends State<MediScanScreen>
     }
     _streamCapturePending = true;
     final likelyPrescription = _streamDetectsPrescription;
+    final previewEvidence = _previewEvidence.snapshotAndReset();
     _streamDetectsPrescription = false;
     unawaited(() async {
       try {
@@ -601,6 +609,7 @@ class _MediScanScreenState extends State<MediScanScreen>
           automatic: true,
           capturedImage: image,
           likelyPrescription: likelyPrescription,
+          previewEvidence: previewEvidence,
         );
       } finally {
         _streamCapturePending = false;
@@ -727,12 +736,17 @@ class _MediScanScreenState extends State<MediScanScreen>
     bool automatic = false,
     XFile? capturedImage,
     bool likelyPrescription = false,
+    ScanPreviewEvidence? previewEvidence,
   }) async {
     // Preserve the latest live preview classification for a manual shutter
     // press. Single-package scans can then use the framed label crop; dense
     // prescription pages retain the full image for multi-item extraction.
     likelyPrescription = likelyPrescription || _streamDetectsPrescription;
     _streamDetectsPrescription = false;
+    if (!automatic) {
+      _previewEvidence.snapshotAndReset();
+      _pendingStrengthConflictName = null;
+    }
     if (_isFlashChanging) {
       // A capture can finish just as the torch request pauses the stream.
       // Let that image proceed after the mode change instead of discarding it.
@@ -805,6 +819,13 @@ class _MediScanScreenState extends State<MediScanScreen>
     String? capturedPath;
     String? preparedPath;
     String? enhancedPath;
+    final captureEvidence = ScanPreviewEvidence();
+    void recordPackageText(String rawText) {
+      if (rawText.trim().isEmpty) return;
+      final cleaned = _ocrCleanup.clean(rawText).text;
+      captureEvidence.observe(_labelParser.parsePrescriptionItems(cleaned));
+    }
+
     // Assigned only after the pause succeeds, so a throw can never release a
     // pause that was never taken.
     VoicePause? voicePause;
@@ -869,6 +890,7 @@ class _MediScanScreenState extends State<MediScanScreen>
         labelFirst: !likelyPrescription,
       );
       if (!mounted || _screenDisposing) return;
+      recordPackageText(localScan.rawText);
 
       // Give a weak first read one local enhancement retry before considering
       // network OCR. Keep the clearer read and release the derived image when
@@ -885,6 +907,7 @@ class _MediScanScreenState extends State<MediScanScreen>
             allowCloudFallback: false,
             labelFirst: !likelyPrescription,
           );
+          recordPackageText(enhancedScan.rawText);
           if (enhancedScan.isComplete ||
               enhancedScan.medicines.length > localScan.medicines.length ||
               (enhancedScan.isCatalogVerified &&
@@ -954,9 +977,15 @@ class _MediScanScreenState extends State<MediScanScreen>
               localResult: localScan,
             );
       if (!mounted || _screenDisposing) return;
+      recordPackageText(coordinatedScan.rawText);
       final cleanedRecognizedText = _ocrCleanup
           .clean(coordinatedScan.rawText)
           .text;
+      // Preview chooses the image crop. The higher-resolution OCR text makes
+      // the final package-versus-prescription decision.
+      final reviewAsPrescription = _labelParser
+          .detectPrescriptionDocument(cleanedRecognizedText)
+          .isPrescription;
       final textKey = cleanedRecognizedText
           .replaceAll(RegExp(r'\s+'), ' ')
           .trim()
@@ -978,15 +1007,17 @@ class _MediScanScreenState extends State<MediScanScreen>
 
       if (_labelCache.containsKey(textKey)) {
         result = _labelCache[textKey];
-        if (likelyPrescription) {
+        if (reviewAsPrescription) {
           mergePrescriptionCandidates(
             _labelParser.parseMany(cleanedRecognizedText),
           );
         }
         debugPrint('MediScan: cached label hit');
       } else {
-        result = _labelParser.parse(cleanedRecognizedText);
-        if (likelyPrescription) {
+        result = reviewAsPrescription
+            ? _labelParser.parse(cleanedRecognizedText)
+            : _labelParser.parsePackage(cleanedRecognizedText);
+        if (reviewAsPrescription) {
           mergePrescriptionCandidates(
             _labelParser.parseMany(cleanedRecognizedText),
           );
@@ -1043,6 +1074,21 @@ class _MediScanScreenState extends State<MediScanScreen>
         return;
       }
 
+      if (!reviewAsPrescription) {
+        final resultName = result.name.toLowerCase().trim();
+        final observedConflict =
+            captureEvidence.conflictsWith(result) ||
+            (automatic && previewEvidence?.conflictsWith(result) == true);
+        if (automatic && (result.strengthConflict || observedConflict)) {
+          _pendingStrengthConflictName = resultName;
+        }
+        if ((observedConflict ||
+                (automatic && _pendingStrengthConflictName == resultName)) &&
+            !result.strengthConflict) {
+          result = _withStrengthConflict(result);
+        }
+      }
+
       if (automatic && !_scanResultGate.accept(result)) {
         setState(() {
           _isScanning = false;
@@ -1067,10 +1113,7 @@ class _MediScanScreenState extends State<MediScanScreen>
       await cleanupCapture();
       resumeVoice();
       if (coordinatedScan.freeQuotaExceeded) await _speakQuotaReached();
-      await _checkAgainstPlanOrContinue(
-        result,
-        quotaExceeded: coordinatedScan.freeQuotaExceeded,
-      );
+      await _checkAgainstPlanOrContinue(result);
     } catch (error, stackTrace) {
       debugPrint('MediScan: label capture failed: $error\n$stackTrace');
       if (automatic) _scanResultGate.accept(null);
@@ -1126,10 +1169,7 @@ class _MediScanScreenState extends State<MediScanScreen>
   /// already contains the medicine.  Only an exact name-and-strength match is
   /// allowed to say "matches"; this code does not make a clinical decision or
   /// tell the person to take a medicine.
-  Future<void> _checkAgainstPlanOrContinue(
-    MedicineLabelResult result, {
-    bool quotaExceeded = false,
-  }) async {
+  Future<void> _checkAgainstPlanOrContinue(MedicineLabelResult result) async {
     final tts = context.read<TtsProvider>();
     // OCR confidence is a safety input, not just UI decoration. A weak read
     // must never silently validate a medicine, but the elder gets a simple,
@@ -1139,11 +1179,8 @@ class _MediScanScreenState extends State<MediScanScreen>
       if (mounted) {
         setState(() => _statusMessage = 'Please confirm what I found.');
       }
-      if (!quotaExceeded) {
-        await _speakUnclearScan();
-      }
-      // The confirmation sheet speaks the finding once. A spoken preamble
-      // here would overlap and be cut off when that sheet starts TTS.
+      // A readable candidate needs confirmation, not a prompt to reposition
+      // the camera. The confirmation sheet speaks the finding once.
       await _confirmDetectedMedicine(result);
       return;
     }
@@ -1370,6 +1407,22 @@ class _MediScanScreenState extends State<MediScanScreen>
     if (result.strengthNeedsReview || result.dosage.isEmpty) return '';
     return ' (${result.dosage})';
   }
+
+  MedicineLabelResult _withStrengthConflict(MedicineLabelResult result) =>
+      MedicineLabelResult(
+        name: result.name,
+        dosage: '',
+        confidence: result.confidence.clamp(0.0, 0.74),
+        nameConfidence: result.nameConfidence,
+        dosageConfidence: 0,
+        rawText: result.rawText,
+        kind: result.kind,
+        source: result.source,
+        barcode: result.barcode,
+        strengthConflict: true,
+        nameConflict: result.nameConflict,
+        alternativeName: result.alternativeName,
+      );
 
   String _spokenMedicineName(MedicineLabelResult result) =>
       MedicineSpeechFormatter.medicineName(result.name);
@@ -2246,6 +2299,7 @@ class _MediScanScreenState extends State<MediScanScreen>
   void _resetScanFlow({bool afterBatch = false, String? message}) {
     if (!mounted) return;
     _scanResultGate.reset();
+    _pendingStrengthConflictName = null;
     _waitForManualScanAfterBatch = afterBatch;
     setState(() {
       _scanResult = null;
