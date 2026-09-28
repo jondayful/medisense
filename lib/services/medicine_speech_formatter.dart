@@ -1,4 +1,5 @@
 import 'ph_drug_catalog.dart';
+import 'ocr_text_cleanup.dart';
 
 /// Converts OCR/database medicine fields into short, natural speech.
 ///
@@ -34,7 +35,9 @@ class MedicineSpeechFormatter {
   const MedicineSpeechFormatter._();
 
   static String medicineName(String value) {
-    final cleaned = _clean(value);
+    final cleaned = _clean(
+      const OcrTextCleanup().joinKnownHyphenatedMedicineWords(value),
+    );
     if (cleaned.isEmpty) return '';
 
     // The catalog tells us when OCR matched a registered brand. Prefer it so

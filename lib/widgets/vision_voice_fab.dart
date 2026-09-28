@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../providers/app_state_provider.dart';
 import '../providers/voice_navigation_provider.dart';
 import '../services/accessibility_feedback.dart';
+import '../services/motion_preferences.dart';
 import '../theme/app_theme.dart';
 import 'model_download_sheet.dart';
 import 'take_confirm_sheet.dart';
@@ -54,7 +55,10 @@ class _VisionVoiceFabState extends State<VisionVoiceFab>
   void didChangeDependencies() {
     super.didChangeDependencies();
     final voice = context.read<VoiceNavigationProvider>();
-    if (identical(voice, _voice)) return;
+    if (identical(voice, _voice)) {
+      _syncListening();
+      return;
+    }
     _voice?.removeListener(_syncListening);
     _voice = voice..addListener(_syncListening);
     _syncListening();
@@ -73,7 +77,12 @@ class _VisionVoiceFabState extends State<VisionVoiceFab>
   void _syncListening() {
     if (!mounted) return;
     if (_voice?.isListening ?? false) {
-      _pulse.repeat(reverse: true);
+      if (prefersReducedMotion(context)) {
+        _pulse.stop();
+        _pulse.value = 1;
+      } else if (!_pulse.isAnimating) {
+        _pulse.repeat(reverse: true);
+      }
       _landmarkTimer ??= Timer.periodic(const Duration(seconds: 3), (_) {
         if (_voice?.isListening ?? false) {
           AccessibilityFeedback.listeningLandmark();

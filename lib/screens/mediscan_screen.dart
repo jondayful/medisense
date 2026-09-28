@@ -3,6 +3,8 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:go_router/go_router.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
@@ -15,6 +17,7 @@ import '../services/medicine_expiry_parser.dart';
 import '../services/scan_speech_parser.dart';
 import '../services/scan_pipeline.dart';
 import '../services/accessibility_feedback.dart';
+import '../services/motion_preferences.dart';
 import '../services/greeting_name.dart';
 import '../models/medication.dart';
 import '../models/dosage.dart';
@@ -28,6 +31,7 @@ import '../services/ocr_text_cleanup.dart';
 import '../services/camera_ocr_stream_service.dart';
 import '../services/ocr_coordinator_service.dart';
 import '../widgets/add_medication_modal.dart';
+import '../widgets/expiry_date_scanner.dart';
 import '../widgets/elder_bottom_nav.dart';
 import '../widgets/medi_bottom_nav.dart';
 
@@ -91,8 +95,12 @@ class _MediScanScreenState extends State<MediScanScreen>
   }
 
   final MedicineLabelParser _labelParser = MedicineLabelParser();
+  final TextRecognizer _textRecognizer = TextRecognizer(
+    script: TextRecognitionScript.latin,
+  );
   late final OcrCoordinatorService _ocrCoordinator = OcrCoordinatorService(
     parser: _labelParser,
+    textRecognizer: _textRecognizer,
   );
   final BarcodeScanService _barcodeScanner = BarcodeScanService();
   final ImagePreprocessor _imagePreprocessor = ImagePreprocessor();
@@ -105,6 +113,7 @@ class _MediScanScreenState extends State<MediScanScreen>
 
   CameraController? _cameraController;
   CameraOcrStreamService? _cameraOcrStream;
+  String? _lastPreviewOcrText;
   Future<void>? _cameraOpenTask;
   Future<XFile>? _pictureTask;
   bool _captureCycleActive = false;
@@ -129,8 +138,10 @@ class _MediScanScreenState extends State<MediScanScreen>
   DateTime? _lastCameraHintAt;
   int _cameraHintGeneration = 0;
   Future<void> _cameraHintSpeech = Future<void>.value();
+  bool _cameraHintActive = false;
   Timer? _autoScanTimer;
   Timer? _initialAutoScanTimer;
+  Timer? _streamFallbackTimer;
   MedicineLabelResult? _scanResult;
   bool _isFlashOn = false;
   bool _isFlashChanging = false;
@@ -246,6 +257,7 @@ class _MediScanScreenState extends State<MediScanScreen>
     }
     _autoScanTimer?.cancel();
     _initialAutoScanTimer?.cancel();
+    _streamFallbackTimer?.cancel();
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       _cameraSuspended = true;
@@ -261,17 +273,29 @@ class _MediScanScreenState extends State<MediScanScreen>
     WidgetsBinding.instance.removeObserver(this);
     _autoScanTimer?.cancel();
     _initialAutoScanTimer?.cancel();
-    unawaited(
-      _closeCamera().whenComplete(() {
-        // Camera/OCR can briefly own the microphone. Re-arm wake listening after
-        // its native resources have closed when leaving Scan.
-        _voiceNavigation?.enableWakeWord();
-      }),
-    );
-    unawaited(_ocrCoordinator.dispose());
+    _streamFallbackTimer?.cancel();
+    unawaited(_disposeOcrResources());
     _barcodeScanner.dispose();
-    unawaited(_imagePreprocessor.dispose());
     super.dispose();
+  }
+
+  Future<void> _disposeOcrResources() async {
+    try {
+      // Finish any preview frame before closing the shared native recognizer.
+      await _closeCamera();
+    } finally {
+      _voiceNavigation?.enableWakeWord();
+      try {
+        // The coordinator drains any still-image OCR already in flight.
+        await _ocrCoordinator.dispose();
+      } finally {
+        try {
+          await _textRecognizer.close();
+        } finally {
+          await _imagePreprocessor.dispose();
+        }
+      }
+    }
   }
 
   Future<void> _initializeCamera() {
@@ -347,12 +371,18 @@ class _MediScanScreenState extends State<MediScanScreen>
       // still captures, so automatic scans never wait for an AF-lock loop.
       await opening.setFocusMode(FocusMode.auto);
       _cameraController = opening;
+      _lastPreviewOcrText = null;
       _cameraOcrStream = CameraOcrStreamService(
         camera: opening,
+        textRecognizer: _textRecognizer,
         onHint: _onCameraOcrHint,
         onCapture: _onCameraOcrCapture,
         onError: _onCameraOcrError,
         onText: (text) {
+          // Stable text is common across adjacent OCR frames. Parsing it again
+          // would block the UI isolate without adding preview evidence.
+          if (text.text == _lastPreviewOcrText) return;
+          _lastPreviewOcrText = text.text;
           final layoutText = _ocrCleanup
               .clean(_labelParser.layoutRecognizedText(text))
               .text;
@@ -432,6 +462,7 @@ class _MediScanScreenState extends State<MediScanScreen>
   void _startAutoScan() {
     _autoScanTimer?.cancel();
     _initialAutoScanTimer?.cancel();
+    _streamFallbackTimer?.cancel();
     if (_screenDisposing ||
         _cameraSuspended ||
         _isFlashChanging ||
@@ -473,7 +504,13 @@ class _MediScanScreenState extends State<MediScanScreen>
     }
     final stream = _cameraOcrStream;
     if (stream != null) {
-      if (!stream.isRunning) unawaited(_startCameraOcrStream(stream));
+      if (stream.isRunning) {
+        if (_streamFallbackTimer == null) {
+          _scheduleStreamStillFallback(stream);
+        }
+      } else {
+        unawaited(_startCameraOcrStream(stream));
+      }
       return;
     }
     _scheduleStillAutoScans();
@@ -481,7 +518,14 @@ class _MediScanScreenState extends State<MediScanScreen>
 
   Future<void> _startCameraOcrStream(CameraOcrStreamService stream) async {
     try {
+      _lastPreviewOcrText = null;
       await stream.startStream();
+      if (mounted &&
+          !_screenDisposing &&
+          !_cameraSuspended &&
+          stream.isRunning) {
+        _scheduleStreamStillFallback(stream);
+      }
     } catch (error) {
       debugPrint('MediScan: camera text stream unavailable: $error');
       try {
@@ -491,6 +535,53 @@ class _MediScanScreenState extends State<MediScanScreen>
         _scheduleStillAutoScans();
       }
     }
+  }
+
+  void _scheduleStreamStillFallback(CameraOcrStreamService stream) {
+    _streamFallbackTimer?.cancel();
+    _streamFallbackTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (!mounted ||
+          _screenDisposing ||
+          _cameraSuspended ||
+          _captureCycleActive ||
+          _streamCapturePending ||
+          _reviewingPrescription ||
+          _isGuidedFlowActive ||
+          _waitForManualScanAfterBatch ||
+          _scanResult != null ||
+          !stream.isRunning ||
+          !identical(_cameraOcrStream, stream)) {
+        return;
+      }
+
+      // A live frame can miss an exposed strength forever, especially when a
+      // shaky hand or a label crop keeps the text moving. Periodically hand a
+      // still image to the full-resolution OCR path so automatic scanning
+      // always gets a chance to read the label.
+      _streamFallbackTimer?.cancel();
+      _streamFallbackTimer = null;
+      _streamCapturePending = true;
+      final likelyPrescription = _streamDetectsPrescription;
+      final previewEvidence = _previewEvidence.snapshotAndReset();
+      unawaited(() async {
+        try {
+          await stream.stopStream();
+          if (!mounted || _screenDisposing || _cameraSuspended) return;
+          await _captureAndReadLabel(
+            automatic: true,
+            likelyPrescription: likelyPrescription,
+            previewEvidence: previewEvidence,
+          );
+        } catch (error) {
+          debugPrint('MediScan: still-image OCR fallback failed: $error');
+        } finally {
+          _streamCapturePending = false;
+          if (mounted && !_screenDisposing && !_cameraSuspended) {
+            _startAutoScan();
+          }
+        }
+      }());
+    });
   }
 
   void _scheduleStillAutoScans() {
@@ -541,6 +632,9 @@ class _MediScanScreenState extends State<MediScanScreen>
         voice.isScanAnswerListening) {
       return;
     }
+    // Framing advice is optional. pauseNavigation stops the current utterance,
+    // so a new hint must not cut off a medicine result or another spoken cue.
+    if (_cameraHintActive || context.read<TtsProvider>().isSpeaking) return;
     final now = DateTime.now();
     if (_lastCameraHintAt != null &&
         now.difference(_lastCameraHintAt!) < const Duration(seconds: 8)) {
@@ -548,16 +642,18 @@ class _MediScanScreenState extends State<MediScanScreen>
     }
     _lastCameraHintAt = now;
     final generation = ++_cameraHintGeneration;
-    _cameraHintSpeech = _speakCameraHint(hint, generation).catchError((error) {
-      debugPrint('MediScan: camera framing speech failed: $error');
-    });
+    _cameraHintActive = true;
+    _cameraHintSpeech = _speakCameraHint(hint, generation)
+        .catchError((error) {
+          debugPrint('MediScan: camera framing speech failed: $error');
+        })
+        .whenComplete(() => _cameraHintActive = false);
   }
 
   Future<void> _speakCameraHint(ScanHint hint, int generation) async {
     final tts = context.read<TtsProvider>();
     final voice = context.read<VoiceNavigationProvider>();
-    // pauseForImageAnalysis stops the active utterance before this cue and
-    // prevents voice-command listening from competing with the guidance. The
+    // Prevent voice-command listening from competing with the guidance. The
     // returned handle must always be released, including on early return.
     final pause = await voice.tryPauseForImageAnalysis();
     if (pause == null) return;
@@ -579,8 +675,8 @@ class _MediScanScreenState extends State<MediScanScreen>
           'Ilayo nang kaunti ang camera para makita ang buong etiketa.',
         ),
         ScanHint.holdSteady => (
-          'Good. Hold the medicine steady while I scan the label.',
-          'Mabuti. Hawakan nang hindi gumagalaw habang binabasa ko ang etiketa.',
+          'Hold the label still for a moment while I find a clear frame.',
+          'Panatilihing hindi gumagalaw ang etiketa sandali habang naghahanap ako ng malinaw na kuha.',
         ),
       };
       await tts.speakCue(english, filipino);
@@ -595,6 +691,7 @@ class _MediScanScreenState extends State<MediScanScreen>
       return;
     }
     _streamCapturePending = true;
+    _lastPreviewOcrText = null;
     final likelyPrescription = _streamDetectsPrescription;
     final previewEvidence = _previewEvidence.snapshotAndReset();
     _streamDetectsPrescription = false;
@@ -770,6 +867,7 @@ class _MediScanScreenState extends State<MediScanScreen>
         _captureCycleActive ||
         _reviewingPrescription ||
         _isGuidedFlowActive ||
+        (automatic && (tts.isSpeaking || _cameraHintActive)) ||
         (automatic && _waitForManualScanAfterBatch)) {
       if (capturedImage != null) {
         unawaited(_deleteCaptureFile(capturedImage.path));
@@ -1218,19 +1316,16 @@ class _MediScanScreenState extends State<MediScanScreen>
         final strength = MedicineSpeechFormatter.strength(medication.dosage);
         await _speakIfVoiceNavigationEnabled(
           tts,
-          '$name, $strength, matches your reviewed medication plan. Check your schedule before taking it.',
-          '$name, $strength, ay tugma sa planong gamot na iyong nasuri. Tingnan ang iyong iskedyul bago ito inumin.',
+          '$name, $strength, is already in your schedule. Check your saved time before taking it.',
+          'Nasa iskedyul mo na ang $name, $strength. Tingnan muna ang nakatakdang oras bago ito inumin.',
         );
         if (mounted) {
           setState(() {
             _unrecognizedAlert = false;
-            _statusMessage = 'Matches your reviewed plan. Check schedule.';
+            _statusMessage = 'Already in your schedule. Check saved time.';
           });
         }
-        // A plan match is still a scan result that needs an explicit user
-        // confirmation. Previously this branch stopped after the status/TTS
-        // update, leaving the user with no "Oo / Confirm" action.
-        await _confirmDetectedMedicine(result);
+        await _showAlreadyScheduled(medication);
         return;
       case PrescriptionScanVerdict.strengthMismatch:
         AccessibilityFeedback.error();
@@ -1433,6 +1528,50 @@ class _MediScanScreenState extends State<MediScanScreen>
   MedicineExpiryInfo? _expiryInfo(MedicineLabelResult result) =>
       MedicineExpiryParser.parse(result.rawText);
 
+  Medication? _scheduledMatch(MedicineLabelResult result) {
+    if (result.requiresDosageInput || result.requiresNameReview) return null;
+    return PrescriptionSafety.findMatchingMedication(
+      scannedName: result.name,
+      scannedStrength: result.dosage,
+      activeMedications: context.read<MedicationProvider>().medications,
+    );
+  }
+
+  Future<void> _showAlreadyScheduled(Medication medication) async {
+    final viewSchedule = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.event_available_rounded),
+        title: const Text('Already in your schedule'),
+        content: Text(
+          '${medication.name} ${medication.dosage} is already saved. '
+          'This scan did not add another copy.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Scan another'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('View schedule'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (viewSchedule == true) {
+      context.go('/schedule');
+    } else if (!_reviewingPrescription) {
+      _resetScanFlow(
+        afterBatch: true,
+        message:
+            'Already in your schedule. Tap Scan to check another medicine.',
+      );
+    }
+  }
+
   Future<void> _showExpiredMedicineWarning(
     MedicineExpiryInfo expiry,
     TtsProvider tts,
@@ -1474,6 +1613,7 @@ class _MediScanScreenState extends State<MediScanScreen>
 
     final tts = context.read<TtsProvider>();
     final voice = context.read<VoiceNavigationProvider>();
+    final scheduledMatch = _scheduledMatch(result);
     // A failed pause must not block the guided flow, so fall back to no pause
     // rather than aborting the review.
     VoicePause? pause;
@@ -1495,10 +1635,15 @@ class _MediScanScreenState extends State<MediScanScreen>
         tts,
         voice,
         expiry,
+        alreadyScheduled: scheduledMatch != null,
       );
       await _stopGuidedAudio(tts, voice);
       if (!mounted) return false;
       if (confirmed == _MedicineDecision.yes) {
+        if (scheduledMatch != null) {
+          await _showAlreadyScheduled(scheduledMatch);
+          return true;
+        }
         final dosageOverride = await _askDoseIfUncertain(result, tts, voice);
         if (!mounted) return false;
         if (result.doseNeedsChoice && dosageOverride == null) {
@@ -1510,6 +1655,13 @@ class _MediScanScreenState extends State<MediScanScreen>
           dosageOverride: dosageOverride,
         );
       } else if (confirmed == _MedicineDecision.edit) {
+        if (scheduledMatch != null) {
+          final saved = await _openMedicationEntry(
+            existingMedication: scheduledMatch,
+          );
+          _resetGuidedState(keepResult: _reviewingPrescription);
+          return saved;
+        }
         return await _startGuidedSchedule(
           MedicineLabelResult(
             name: result.name,
@@ -1774,10 +1926,30 @@ class _MediScanScreenState extends State<MediScanScreen>
       return false;
     }
 
+    MedicineExpiryInfo? expiration = _expiryInfo(result);
+    if (expiration == null && await _askToScanExpiration(result.name)) {
+      if (!mounted) return false;
+      await _closeCamera();
+      if (!mounted) return false;
+      expiration = await ExpiryDateScannerScreen.open(context);
+      if (!mounted) return false;
+      if (expiration?.isExpired == true) {
+        await _showExpiredMedicineWarning(
+          expiration!,
+          context.read<TtsProvider>(),
+        );
+        _resetGuidedState();
+        return false;
+      }
+    }
+    if (!mounted) return false;
+
     final saved = await _openMedicationEntry(
       result: result,
       frequency: frequency,
       time: time,
+      expirationDate: expiration?.effectiveExpirationDate,
+      expirationPromptHandled: true,
       dosageOverride: dosageOverride,
       quantityDispensed: parsedInstruction.quantityDispensed,
       unitsPerDose: parsedInstruction.unitsPerDose,
@@ -1959,10 +2131,10 @@ class _MediScanScreenState extends State<MediScanScreen>
           failedAttempts++;
           await tts.speak(
             failedAttempts == 1
-                ? 'I did not catch a time. Say a time such as 7 AM or 10 PM, or say now.'
+                ? 'I did not catch a time. Say 7:39 AM, 10:27 PM, or now.'
                 : 'Tap the microphone to try again, or pick a time on the screen.',
             failedAttempts == 1
-                ? 'Hindi ko naintindihan ang oras. Sabihin ang alas otso ng umaga, alas diyes ng gabi, o ngayon.'
+                ? 'Hindi ko naintindihan ang oras. Sabihin ang alas siyete trenta y nuwebe ng umaga, alas diyes bente siyete ng gabi, o ngayon.'
                 : 'Pindutin ang mikropono para sumubok muli, o pumili ng oras sa screen.',
           );
           await _waitForTts(tts);
@@ -1979,6 +2151,107 @@ class _MediScanScreenState extends State<MediScanScreen>
     final choice = await decision.future;
     if (useVoice) await _stopGuidedAudio(tts, voice);
     return choice;
+  }
+
+  Future<bool> _askToScanExpiration(String medicineName) async {
+    final tts = context.read<TtsProvider>();
+    final voice = context.read<VoiceNavigationProvider>();
+    final appState = context.read<AppStateProvider>();
+    final useVoice = await _prepareGuidedVoice(voice);
+    if (!mounted) return false;
+    final micGate = _GuidedMicGate(voice);
+    final decision = Completer<bool>();
+    final english =
+        'Would you like to scan the expiration date for $medicineName?';
+    final filipino =
+        'Gusto mo bang i-scan ang expiration date ng $medicineName?';
+    final sheetResult = showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(
+          appState.isFilipino
+              ? 'I-scan ang expiration date?'
+              : 'Scan expiration date?',
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              appState.isFilipino ? filipino : english,
+              style: TextStyle(
+                fontSize: appState.accessibilityMode.usesLargeText ? 21 : 17,
+                height: 1.35,
+              ),
+            ),
+            if (useVoice) ...[
+              const SizedBox(height: 16),
+              _ScanAnswerMicControl(onPressed: micGate.tap),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text(appState.isFilipino ? 'Laktawan' : 'Skip'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            icon: const Icon(Icons.camera_alt_outlined),
+            label: Text(appState.isFilipino ? 'I-scan' : 'Scan now'),
+          ),
+        ],
+      ),
+    );
+    sheetResult.then((value) {
+      if (!decision.isCompleted) decision.complete(value ?? false);
+    });
+
+    if (appState.voiceNavigationEnabled) {
+      unawaited(() async {
+        try {
+          await tts.speak(english, filipino);
+          await _waitForTts(tts);
+        } catch (error) {
+          debugPrint('MediScan: expiration prompt speech unavailable: $error');
+          return;
+        }
+        if (!useVoice || !mounted || decision.isCompleted) return;
+        while (mounted && !decision.isCompleted) {
+          String? answer;
+          try {
+            answer = await voice.listenForScanAnswer(
+              duration: const Duration(seconds: 8),
+            );
+          } catch (error) {
+            debugPrint('MediScan: expiration answer unavailable: $error');
+            return;
+          }
+          if (!mounted || decision.isCompleted || !voice.pushToTalkMode) return;
+          if (_isYes(answer) || _isNo(answer)) {
+            final shouldScan = _isYes(answer);
+            HapticFeedback.lightImpact();
+            Navigator.of(context).pop(shouldScan);
+            decision.complete(shouldScan);
+            return;
+          }
+          await tts.speak(
+            'Please say yes or no, or choose a button.',
+            'Sabihin ang oo o hindi, o pumili ng button.',
+          );
+          await _waitForTts(tts);
+          if (!mounted ||
+              decision.isCompleted ||
+              !await micGate.waitForTapOr(decision.future)) {
+            return;
+          }
+        }
+      }());
+    }
+
+    final shouldScan = await decision.future;
+    await _stopGuidedAudio(tts, voice);
+    return shouldScan;
   }
 
   Future<void> _stopGuidedAudio(
@@ -2104,8 +2377,9 @@ class _MediScanScreenState extends State<MediScanScreen>
     MedicineLabelResult result,
     TtsProvider tts,
     VoiceNavigationProvider voice,
-    MedicineExpiryInfo? expiry,
-  ) async {
+    MedicineExpiryInfo? expiry, {
+    bool alreadyScheduled = false,
+  }) async {
     final useVoice = await _prepareGuidedVoice(voice);
     if (!mounted) return null;
     final micGate = _GuidedMicGate(voice);
@@ -2124,6 +2398,7 @@ class _MediScanScreenState extends State<MediScanScreen>
         child: _MedicineConfirmationSheet(
           result: result,
           expiry: expiry,
+          alreadyScheduled: alreadyScheduled,
           showVoiceControl: useVoice,
           onVoiceTap: micGate.tap,
         ),
@@ -2151,7 +2426,9 @@ class _MediScanScreenState extends State<MediScanScreen>
       if (spokenStrength.isNotEmpty) spokenStrength,
       if (spokenFrequency.isNotEmpty) spokenFrequency,
     ].join(', ');
-    final englishPrompt = result.nameConflict
+    final englishPrompt = alreadyScheduled
+        ? 'I found $spokenName $spokenStrength in your schedule. Please check that the label matches.'
+        : result.nameConflict
         ? 'The scans disagree on the medicine name: ${result.name} or ${result.alternativeName}. Check the prescription before confirming.'
         : result.strengthConflict
         ? 'The scans disagree on the strength of $spokenName. Please check the label and enter the strength yourself after confirming the medicine.'
@@ -2162,7 +2439,9 @@ class _MediScanScreenState extends State<MediScanScreen>
         : result.isHighConfidence
         ? 'I found $spokenName${findingDetails.isEmpty ? '' : ', $findingDetails'}. Would you like to add this to your schedule?'
         : 'I found a possible label. Please confirm the details. Is $spokenName $spokenStrength the medicine you will take?';
-    final filipinoPrompt = result.nameConflict
+    final filipinoPrompt = alreadyScheduled
+        ? 'Nasa iskedyul mo na ang $spokenName $spokenStrength. Pakisuri kung tugma ang etiketa.'
+        : result.nameConflict
         ? 'Magkaiba ang nabasang pangalan ng gamot: ${result.name} o ${result.alternativeName}. Suriin ang reseta bago kumpirmahin.'
         : result.strengthConflict
         ? 'Magkaiba ang nabasang lakas ng $spokenName. Pakisuri ang etiketa at ilagay ang tamang lakas pagkatapos kumpirmahin ang gamot.'
@@ -2219,10 +2498,14 @@ class _MediScanScreenState extends State<MediScanScreen>
                 : _MedicineDecision.no;
             await tts.speak(
               isYes
-                  ? 'Okay, I will add this medicine.'
+                  ? alreadyScheduled
+                        ? 'Okay, this medicine is already in your schedule.'
+                        : 'Okay, I will add this medicine.'
                   : 'Okay, I will skip this medicine.',
               isYes
-                  ? 'Sige, idaragdag ko ang gamot na ito.'
+                  ? alreadyScheduled
+                        ? 'Nasa iskedyul mo na ang gamot na ito.'
+                        : 'Sige, idaragdag ko ang gamot na ito.'
                   : 'Sige, lalaktawan ko ang gamot na ito.',
             );
             if (!mounted || decision.isCompleted) return;
@@ -2335,13 +2618,20 @@ class _MediScanScreenState extends State<MediScanScreen>
 
   Future<bool> _openMedicationEntry({
     MedicineLabelResult? result,
+    Medication? existingMedication,
     String? frequency,
     TimeOfDay? time,
+    DateTime? expirationDate,
+    bool expirationPromptHandled = false,
     String? dosageOverride,
     int? quantityDispensed,
     double? unitsPerDose,
     bool requireDosage = false,
   }) async {
+    // The EXP scanner can be opened from the review form, so release the
+    // medicine camera before showing that form.
+    await _closeCamera();
+    if (!mounted) return false;
     var saved = false;
     await showModalBottomSheet<void>(
       context: context,
@@ -2351,15 +2641,22 @@ class _MediScanScreenState extends State<MediScanScreen>
       enableDrag: true,
       backgroundColor: Colors.transparent,
       builder: (context) => AddMedicationModal(
+        initialMedication: existingMedication,
         initialName: result?.name,
         initialDosage: requireDosage ? null : dosageOverride ?? result?.dosage,
-        initialExpirationDate: result == null
-            ? null
-            : _expiryInfo(result)?.effectiveExpirationDate,
+        initialExpirationDate:
+            expirationDate ??
+            (result == null
+                ? null
+                : _expiryInfo(result)?.effectiveExpirationDate),
         initialFrequency: frequency,
         initialTime: time,
         initialQuantityDispensed: quantityDispensed,
         initialUnitsPerDose: unitsPerDose,
+        promptForExpirationScan:
+            result != null &&
+            existingMedication == null &&
+            !expirationPromptHandled,
         onSaved: () => saved = true,
       ),
     );
@@ -2682,12 +2979,14 @@ class _CameraShutter extends StatelessWidget {
 class _MedicineConfirmationSheet extends StatelessWidget {
   final MedicineLabelResult result;
   final MedicineExpiryInfo? expiry;
+  final bool alreadyScheduled;
   final bool showVoiceControl;
   final VoidCallback? onVoiceTap;
 
   const _MedicineConfirmationSheet({
     required this.result,
     this.expiry,
+    this.alreadyScheduled = false,
     this.showVoiceControl = false,
     this.onVoiceTap,
   });
@@ -2739,6 +3038,8 @@ class _MedicineConfirmationSheet extends StatelessWidget {
                   ? '${result.name} ba ang gamot? Magkaiba ang nabasang lakas; ilagay ito nang manu-mano.'
                   : result.strengthNeedsReview
                   ? '${result.name} ba ang gamot? Mukhang mali ang nabasang ${result.dosage}; ilagay ang tamang lakas.'
+                  : alreadyScheduled
+                  ? '${result.name} ${result.dosage} is already in your schedule. Does the label match?'
                   : '${result.name} ${result.dosage} ba ang iinumin mo?',
               style: AppTheme.textStyle(
                 color: isDark
@@ -2780,66 +3081,77 @@ class _MedicineConfirmationSheet extends StatelessWidget {
                   color: isDark ? AppTheme.darkBorder : AppTheme.timber,
                 ),
               ),
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Container(
-                    width: 54,
-                    height: 54,
-                    decoration: BoxDecoration(
-                      color: AppTheme.foil.withValues(alpha: .16),
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                    child: const Icon(
-                      Icons.medication_rounded,
-                      color: AppTheme.foil,
-                      size: 29,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          result.name,
-                          style: AppTheme.textStyle(
-                            fontSize: 20,
-                            fontWeight: FontWeight.w800,
-                            color: isDark
-                                ? AppTheme.darkTextPrimary
-                                : AppTheme.inkText,
-                          ),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Container(
+                        width: 54,
+                        height: 54,
+                        decoration: BoxDecoration(
+                          color: AppTheme.foil.withValues(alpha: .16),
+                          borderRadius: BorderRadius.circular(14),
                         ),
-                        const SizedBox(height: 3),
-                        Text(
-                          result.dosage.isEmpty
-                              ? 'Dosage needs review'
-                              : result.dosage,
-                          style: AppTheme.textStyle(
-                            fontSize: 14,
-                            color: isDark
-                                ? AppTheme.darkTextSecondary
-                                : AppTheme.mutedText,
-                          ),
+                        child: const Icon(
+                          Icons.medication_rounded,
+                          color: AppTheme.foil,
+                          size: 29,
                         ),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              result.name,
+                              softWrap: true,
+                              style: AppTheme.textStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.w800,
+                                color: isDark
+                                    ? AppTheme.darkTextPrimary
+                                    : AppTheme.inkText,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              result.dosage.isEmpty
+                                  ? 'Dosage needs review'
+                                  : result.dosage,
+                              style: AppTheme.textStyle(
+                                fontSize: 14,
+                                color: isDark
+                                    ? AppTheme.darkTextSecondary
+                                    : AppTheme.mutedText,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 6,
-                    ),
-                    decoration: BoxDecoration(
-                      color: AppTheme.ink.withValues(alpha: .12),
-                      borderRadius: BorderRadius.circular(99),
-                    ),
-                    child: Text(
-                      '${(result.confidence * 100).round()}% match',
-                      style: AppTheme.textStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w800,
-                        color: AppTheme.ink,
+                  const SizedBox(height: 10),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppTheme.ink.withValues(alpha: .12),
+                        borderRadius: BorderRadius.circular(99),
+                      ),
+                      child: Text(
+                        '${(result.confidence * 100).round()}% match',
+                        style: AppTheme.textStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                          color: AppTheme.ink,
+                        ),
                       ),
                     ),
                   ),
@@ -2857,7 +3169,9 @@ class _MedicineConfirmationSheet extends StatelessWidget {
                 onPressed: () =>
                     Navigator.of(context).pop(_MedicineDecision.yes),
                 icon: const Icon(Icons.check_rounded),
-                label: const Text('Oo / Confirm'),
+                label: Text(
+                  alreadyScheduled ? 'Oo / Matches schedule' : 'Oo / Confirm',
+                ),
                 style: FilledButton.styleFrom(
                   backgroundColor: AppTheme.ink,
                   foregroundColor: Colors.white,
@@ -3273,7 +3587,7 @@ class _GuidedTimeSheetState extends State<_GuidedTimeSheet> {
               const SizedBox(height: 18),
               Center(
                 child: Text(
-                  'Say a time such as 7 AM or 10 PM, or say “ngayon” — or pick a time',
+                  'Say 7:39 AM or 10:27 PM, say “ngayon,” or pick a time.',
                   textAlign: TextAlign.center,
                   style: AppTheme.textStyle(
                     color: muted,
@@ -3450,7 +3764,18 @@ class _ScanningLineState extends State<_ScanningLine>
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1300),
-    )..repeat(reverse: true);
+    );
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final animate = !prefersReducedMotion(context);
+    if (animate && !_controller.isAnimating) {
+      _controller.repeat(reverse: true);
+    } else if (!animate && _controller.isAnimating) {
+      _controller.stop();
+    }
   }
 
   @override
@@ -3461,13 +3786,17 @@ class _ScanningLineState extends State<_ScanningLine>
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, child) {
-        return Positioned(
-          top: 280 * _controller.value,
-          left: 20,
-          right: 20,
+    return Positioned(
+      top: 0,
+      left: 20,
+      right: 20,
+      child: RepaintBoundary(
+        child: AnimatedBuilder(
+          animation: _controller,
+          builder: (context, child) => Transform.translate(
+            offset: Offset(0, 280 * _controller.value),
+            child: child,
+          ),
           child: Container(
             height: 2,
             decoration: BoxDecoration(
@@ -3487,8 +3816,8 @@ class _ScanningLineState extends State<_ScanningLine>
               ),
             ),
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 }

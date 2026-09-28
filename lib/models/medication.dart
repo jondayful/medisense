@@ -31,6 +31,13 @@ class ScheduleTime {
     return 'Night';
   }
 
+  static String filipinoPeriodFor(int hour) {
+    if (hour >= 5 && hour < 12) return 'umaga';
+    if (hour >= 12 && hour < 15) return 'tanghali';
+    if (hour >= 15 && hour < 18) return 'hapon';
+    return 'gabi';
+  }
+
   static String formatTime(TimeOfDay time) {
     final hour = time.hourOfPeriod == 0 ? 12 : time.hourOfPeriod;
     final minute = time.minute.toString().padLeft(2, '0');

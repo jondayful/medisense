@@ -8,6 +8,7 @@ import '../providers/app_state_provider.dart';
 import '../providers/tts_provider.dart';
 import '../providers/voice_navigation_provider.dart';
 import '../services/accessibility_feedback.dart';
+import '../services/motion_preferences.dart';
 import '../theme/app_theme.dart';
 import '../widgets/mode_card.dart';
 import '../widgets/model_download_sheet.dart';
@@ -34,17 +35,8 @@ class _OnboardingSetupScreenState extends State<OnboardingSetupScreen> {
     super.dispose();
   }
 
-  bool _hasVoiceStep(AppStateProvider appState) =>
-      appState.voiceNavigationEnabled;
-
-  void _next(AppStateProvider appState) {
-    setState(() {
-      if (_step == 2 && !_hasVoiceStep(appState)) {
-        _step = 4;
-      } else if (_step < 4) {
-        _step++;
-      }
-    });
+  void _next() {
+    if (_step < 4) setState(() => _step++);
   }
 
   void _goToName() => setState(() => _step = 4);
@@ -57,28 +49,15 @@ class _OnboardingSetupScreenState extends State<OnboardingSetupScreen> {
     context.go(route);
   }
 
-  void _back(AppStateProvider appState) {
+  void _back() {
     if (_step == 0) return;
-    setState(() {
-      if (_step == 4 && !_hasVoiceStep(appState)) {
-        _step = 2;
-      } else if (_step == 4 && _hasVoiceStep(appState)) {
-        _step = 3;
-      } else {
-        _step--;
-      }
-    });
+    setState(() => _step--);
   }
 
   void _finish(AppStateProvider appState) async {
     await appState.setOnboardingName(_nameController.text);
     appState.completeOnboarding();
     if (!mounted) return;
-    context.go('/');
-  }
-
-  void _skip(AppStateProvider appState) {
-    appState.completeOnboarding();
     context.go('/');
   }
 
@@ -104,13 +83,15 @@ class _OnboardingSetupScreenState extends State<OnboardingSetupScreen> {
     if (!mounted) return;
     AccessibilityFeedback.voiceResolved();
     final tts = context.read<TtsProvider>();
+    final recognized =
+        heard != null && VoiceNavigationProvider.isWakeWord(heard);
     await tts.speak(
-      heard == null || heard.isEmpty
-          ? 'I did not hear a phrase. Please try again.'
-          : 'Hello. I heard $heard.',
-      heard == null || heard.isEmpty
-          ? 'Hindi ko narinig ang sinabi mo. Subukan muli.'
-          : 'Kumusta. Narinig ko ang $heard.',
+      recognized
+          ? 'Great. I heard Hey MediSense. You can now say a command.'
+          : 'Try saying Hey MediSense clearly while the microphone is listening.',
+      recognized
+          ? 'Ayos. Narinig ko ang Hey MediSense. Maaari ka nang magsabi ng utos.'
+          : 'Sabihin ang Hey MediSense habang nakikinig ang mikropono.',
     );
   }
 
@@ -133,7 +114,7 @@ class _OnboardingSetupScreenState extends State<OnboardingSetupScreen> {
                   if (_step > 0)
                     IconButton(
                       tooltip: 'Go back',
-                      onPressed: () => _back(appState),
+                      onPressed: _back,
                       icon: const Icon(Icons.arrow_back_rounded),
                       constraints: const BoxConstraints.tightFor(
                         width: 48,
@@ -155,10 +136,7 @@ class _OnboardingSetupScreenState extends State<OnboardingSetupScreen> {
                       ),
                     ),
                   ),
-                  TextButton(
-                    onPressed: () => _skip(appState),
-                    child: const Text('Skip'),
-                  ),
+                  const SizedBox(width: 48),
                 ],
               ),
             ),
@@ -181,7 +159,9 @@ class _OnboardingSetupScreenState extends State<OnboardingSetupScreen> {
                     ScrollViewKeyboardDismissBehavior.onDrag,
                 padding: const EdgeInsets.fromLTRB(24, 28, 24, 32),
                 child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 220),
+                  duration: prefersReducedMotion(context)
+                      ? Duration.zero
+                      : const Duration(milliseconds: 180),
                   child: _buildStep(
                     appState,
                     titleSize,
@@ -209,9 +189,9 @@ class _OnboardingSetupScreenState extends State<OnboardingSetupScreen> {
       case 1:
         return _voiceStep(appState, titleSize, isDark, key);
       case 2:
-        return _scanStep(appState, titleSize, key);
-      case 3:
         return _trainingStep(appState, titleSize, key);
+      case 3:
+        return _scanStep(appState, titleSize, key);
       default:
         return _nameStep(appState, titleSize, key);
     }
@@ -236,11 +216,18 @@ class _OnboardingSetupScreenState extends State<OnboardingSetupScreen> {
               mode: mode,
               selected: appState.accessibilityMode == mode,
               isElder: appState.accessibilityMode.usesLargeText,
-              onTap: () => appState.setAccessibilityMode(mode),
+              onTap: () async {
+                await appState.setAccessibilityMode(mode);
+                if (!mounted || !mode.isVisionLoss) return;
+                await context.read<TtsProvider>().speak(
+                  'Vision Loss mode selected. The microphone is in the center of the bottom bar. I will guide you through a practice command next.',
+                  'Napili ang Vision Loss mode. Nasa gitna ng ibabang bar ang mikropono. Tuturuan kitang magsabi ng utos.',
+                );
+              },
             ),
           ),
         ),
-        _primaryButton('Continue', () => _next(appState)),
+        _primaryButton('Continue', _next),
       ],
     );
   }
@@ -324,20 +311,39 @@ class _OnboardingSetupScreenState extends State<OnboardingSetupScreen> {
           _testingVoice ? null : _testVoice,
           icon: Icons.volume_up_rounded,
         ),
-        _primaryButton('Continue', () => _next(appState)),
+        _primaryButton('Continue', _next),
       ],
     );
   }
 
   Widget _scanStep(AppStateProvider appState, double titleSize, Key key) {
+    final isLarge = appState.accessibilityMode.isElder;
+    final isVision = appState.accessibilityMode.isVisionLoss;
     return _Page(
       key: key,
       title: 'Add Your First Medicine',
-      subtitle:
-          'Scan a prescription label or box now to have your schedule ready right away.',
+      subtitle: isLarge
+          ? 'We will guide you step by step. You can scan a label or enter the medicine yourself.'
+          : isVision
+          ? 'You can use the center microphone for voice help while adding a medicine.'
+          : 'Scan a prescription label or box now to have your schedule ready right away.',
       titleSize: titleSize,
       children: [
         _iconPanel(Icons.document_scanner_rounded),
+        if (isLarge) ...[
+          _commandCard('1. Hold the medicine label steady in good light.'),
+          _commandCard(
+            '2. Check the medicine name and strength before saving.',
+          ),
+          _commandCard(
+            '3. Set the time and expiration month, then turn on reminders.',
+          ),
+        ],
+        if (isVision) ...[
+          _commandCard('Find the microphone in the center of the bottom bar.'),
+          _commandCard('Tap it and say “Hey MediSense” to practise.'),
+          _commandCard('Say “Read today’s schedule” to hear your medicines.'),
+        ],
         _primaryButton(
           'Scan Medicine Now',
           () => _startMedicineEntry(appState, '/scan'),
@@ -357,27 +363,51 @@ class _OnboardingSetupScreenState extends State<OnboardingSetupScreen> {
   }
 
   Widget _trainingStep(AppStateProvider appState, double titleSize, Key key) {
+    final largeText = appState.accessibilityMode.isElder;
+    final voice = appState.voiceNavigationEnabled;
     return _Page(
       key: key,
-      title: 'Ready to use your voice?',
-      subtitle:
-          'Whenever you need help, tap the center microphone at the bottom and speak clearly.',
+      title: largeText
+          ? 'Find your daily medicines'
+          : voice
+          ? 'Ready to use your voice?'
+          : 'Your everyday medicine routine',
+      subtitle: largeText
+          ? 'The Schedule tab puts the current time of day first. Tap a medicine to review its details, then mark a dose taken after you take it.'
+          : appState.accessibilityMode.isVisionLoss
+          ? 'The center microphone is your guide. Tap it, say “Hey MediSense”, then ask for your schedule or next medicine.'
+          : 'Scan a label, check the result, and set a reminder for each medicine.',
       titleSize: titleSize,
       children: [
-        _iconPanel(Icons.mic_rounded, large: true),
-        for (final command in [
-          'What is my next medicine?',
-          'Mark Biogesic as taken',
-          'Read today’s schedule',
-          'Where am I?',
-        ])
-          _commandCard(command),
-        _outlineButton(
-          'Try saying: Hello MediSense',
-          _practiceVoice,
-          icon: Icons.mic_rounded,
+        _iconPanel(
+          voice ? Icons.mic_rounded : Icons.calendar_month_rounded,
+          large: true,
         ),
-        _primaryButton('Continue', () => _next(appState)),
+        if (largeText) ...[
+          _commandCard('The top section shows medicines for the current time.'),
+          _commandCard('Tap a medicine to check its dose and expiry month.'),
+          _commandCard('A reminder alarm will sound at its scheduled time.'),
+        ],
+        if (!largeText && !voice) ...[
+          _commandCard('Check the medicine name and strength after a scan.'),
+          _commandCard('Set a reminder time and expiration month.'),
+          _commandCard('Open Schedule to see what is due now.'),
+        ],
+        if (voice) ...[
+          for (final command in [
+            'What is my next medicine?',
+            'Mark Biogesic as taken',
+            'Read today’s schedule',
+            'Where am I?',
+          ])
+            _commandCard(command),
+          _outlineButton(
+            'Practise: Hey MediSense',
+            _practiceVoice,
+            icon: Icons.mic_rounded,
+          ),
+        ],
+        _primaryButton('Continue', _next),
       ],
     );
   }

@@ -35,6 +35,13 @@ class _CarePatientDashboardState extends State<CarePatientDashboard>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _refresh();
+    if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+      _startPolling();
+    }
+  }
+
+  void _startPolling() {
+    if (_refreshTimer != null) return;
     _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(_refresh);
     });
@@ -42,7 +49,13 @@ class _CarePatientDashboardState extends State<CarePatientDashboard>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && mounted) setState(_refresh);
+    if (state == AppLifecycleState.resumed && mounted) {
+      setState(_refresh);
+      _startPolling();
+    } else {
+      _refreshTimer?.cancel();
+      _refreshTimer = null;
+    }
   }
 
   @override

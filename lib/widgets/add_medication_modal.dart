@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -6,9 +8,14 @@ import '../theme/app_theme.dart';
 import '../providers/medication_provider.dart';
 import '../providers/notification_provider.dart';
 import '../providers/app_state_provider.dart';
+import '../providers/tts_provider.dart';
+import '../models/accessibility_mode.dart';
 import '../models/medication.dart';
 import '../models/dosage.dart';
 import '../services/medicine_expiry_parser.dart';
+import '../services/prescription_safety.dart';
+import 'expiry_month_picker.dart';
+import 'expiry_date_scanner.dart';
 
 class AddMedicationModal extends StatefulWidget {
   final Medication? initialMedication;
@@ -19,6 +26,7 @@ class AddMedicationModal extends StatefulWidget {
   final DateTime? initialExpirationDate;
   final int? initialQuantityDispensed;
   final double? initialUnitsPerDose;
+  final bool promptForExpirationScan;
   final VoidCallback? onSaved;
 
   const AddMedicationModal({
@@ -31,6 +39,7 @@ class AddMedicationModal extends StatefulWidget {
     this.initialExpirationDate,
     this.initialQuantityDispensed,
     this.initialUnitsPerDose,
+    this.promptForExpirationScan = false,
     this.onSaved,
   });
 
@@ -231,9 +240,17 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
   String? _dosageStrength;
   String? _dosageRaw;
   bool _dosageEdited = false;
+
+  bool get _usesLargeText =>
+      context.read<AppStateProvider>().accessibilityMode.usesLargeText;
   String? _selectedFrequency = 'Once a day';
   TimeOfDay? _selectedTime;
   DateTime? _selectedExpirationDate;
+  DateTime? _originalExpirationDate;
+  DateTime? _scannedExpirationDate;
+  bool _expirationEdited = false;
+  bool _expirationPromptHandled = false;
+  bool _saving = false;
   final _expirationCtrl = TextEditingController();
   String _selectedForm = 'Tablet';
   final Map<String, bool> _preservedTaken = {};
@@ -245,6 +262,7 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
     _selectedExpirationDate =
         widget.initialMedication?.expirationDate ??
         widget.initialExpirationDate;
+    _originalExpirationDate = _selectedExpirationDate;
     if (_selectedExpirationDate != null) {
       _expirationCtrl.text = _formatExpiration(_selectedExpirationDate!);
     }
@@ -311,29 +329,52 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
     );
     if (picked != null && mounted) {
       setState(() => _selectedTime = picked);
+      await _offerExpirationScanAfterTime();
     }
   }
 
+  Future<void> _offerExpirationScanAfterTime() async {
+    if (!widget.promptForExpirationScan ||
+        _expirationPromptHandled ||
+        _expirationCtrl.text.trim().isNotEmpty) {
+      return;
+    }
+    _expirationPromptHandled = true;
+    final shouldScan = await _askToScanExpiration(_nameCtrl.text.trim());
+    if (!mounted) return;
+    if (shouldScan == true) await _scanExpirationDate();
+  }
+
   Future<void> _pickExpirationDate() async {
-    final today = DateUtils.dateOnly(DateTime.now());
-    final initialDate = _selectedExpirationDate ?? today;
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: initialDate,
-      firstDate: DateTime(2000),
-      lastDate: DateTime(2100),
-      helpText: 'Select the date printed on the medicine label',
+    final picked = await showExpiryMonthPicker(
+      context,
+      initialDate: _selectedExpirationDate,
+      largeText: _usesLargeText,
     );
     if (picked != null && mounted) {
       setState(() {
-        _selectedExpirationDate = DateUtils.dateOnly(picked);
+        _expirationEdited = true;
+        _scannedExpirationDate = null;
+        _selectedExpirationDate = picked;
         _expirationCtrl.text = _formatExpiration(picked);
       });
     }
   }
 
+  Future<void> _scanExpirationDate() async {
+    final result = await ExpiryDateScannerScreen.open(context);
+    if (result == null || !mounted) return;
+    final effectiveDate = result.effectiveExpirationDate;
+    setState(() {
+      _expirationEdited = true;
+      _scannedExpirationDate = effectiveDate;
+      _selectedExpirationDate = effectiveDate;
+      _expirationCtrl.text = _formatExpiration(effectiveDate);
+    });
+  }
+
   String _formatExpiration(DateTime date) =>
-      '${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}-${date.year.toString().padLeft(4, '0')}';
+      '${date.month.toString().padLeft(2, '0')}/${date.year.toString().padLeft(4, '0')}';
 
   void _prefillDosage(String source) {
     final parsed = Dosage.parse(source);
@@ -412,7 +453,57 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
     return rawText;
   }
 
+  Future<bool?> _askToScanExpiration(String medicineName) async {
+    final appState = context.read<AppStateProvider>();
+    final english =
+        'Would you like to scan the expiration date for $medicineName?';
+    final filipino =
+        'Gusto mo bang i-scan ang expiration date ng $medicineName?';
+    final large = appState.accessibilityMode.usesLargeText;
+    final isFilipino = appState.isFilipino;
+    final prompt = showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(isFilipino ? 'Petsa ng expiration' : 'Expiration date'),
+        content: Text(
+          isFilipino ? filipino : english,
+          style: TextStyle(fontSize: large ? 21 : 17, height: 1.35),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: Text(isFilipino ? 'Laktawan' : 'Skip'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.camera_alt_outlined),
+            label: Text(isFilipino ? 'I-scan' : 'Scan now'),
+          ),
+        ],
+      ),
+    );
+    if (appState.voiceNavigationEnabled) {
+      unawaited(context.read<TtsProvider>().speak(english, filipino));
+    }
+    final answer = await prompt;
+    if (mounted && appState.voiceNavigationEnabled) {
+      await context.read<TtsProvider>().stop();
+    }
+    return answer;
+  }
+
   Future<void> _saveMedication() async {
+    if (_saving) return;
+    _saving = true;
+    try {
+      await _saveMedicationOnce();
+    } finally {
+      _saving = false;
+    }
+  }
+
+  Future<void> _saveMedicationOnce() async {
     final name = _nameCtrl.text.trim();
     if (name.isEmpty) return;
     final dosageValue = _dosageCtrl.text.trim();
@@ -431,14 +522,29 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
       final confirmed = await _confirmInsulinDose();
       if (!confirmed || !mounted) return;
     }
+    if (widget.promptForExpirationScan && _selectedTime == null) {
+      await _pickTime();
+      return;
+    }
+    if (widget.promptForExpirationScan &&
+        !_expirationPromptHandled &&
+        _expirationCtrl.text.trim().isEmpty) {
+      await _offerExpirationScanAfterTime();
+      if (!mounted) return;
+    }
     final expirationInput = _expirationCtrl.text.trim();
     final expiration = expirationInput.isEmpty
         ? null
+        : !_expirationEdited && _originalExpirationDate != null
+        ? _originalExpirationDate
+        : _scannedExpirationDate != null &&
+              expirationInput == _formatExpiration(_scannedExpirationDate!)
+        ? _scannedExpirationDate
         : MedicineExpiryParser.parseManual(expirationInput);
     if (expirationInput.isNotEmpty && expiration == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Enter a real expiration date in MM-DD-YYYY format.'),
+          content: Text('Enter a real expiration month in MM/YYYY format.'),
         ),
       );
       return;
@@ -481,9 +587,39 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
       prescriptionReviewed: true,
     );
 
+    // A scan may lead here after a low-confidence read or a manual edit.
+    // Recheck the final name and strength before writing a second record.
+    if (!isEdit && widget.initialName != null) {
+      final existing = PrescriptionSafety.findMatchingMedication(
+        scannedName: newMed.name,
+        scannedStrength: newMed.dosage,
+        activeMedications: provider.medications,
+      );
+      if (existing != null) {
+        await showDialog<void>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Already in your schedule'),
+            content: Text(
+              '${existing.name} ${existing.dosage} is already saved. '
+              'Open your schedule to change the existing entry.',
+            ),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+        return;
+      }
+    }
+
     final notifications = context.read<NotificationProvider>();
     final alarmsEnabled = context.read<AppStateProvider>().notificationsEnabled;
-    if (alarmsEnabled) {
+    final hasScheduledAlarm = alarmsEnabled && newMed.schedule.isNotEmpty;
+    if (hasScheduledAlarm) {
       final alarmReady = await notifications.ensureAlarmPermissions();
       if (!mounted) return;
       if (!alarmReady) {
@@ -495,7 +631,9 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
       }
     }
 
-    final alarmTimeLabel = newMed.schedule.first.time.format(context);
+    final alarmTimeLabel = hasScheduledAlarm
+        ? newMed.schedule.first.time.format(context)
+        : null;
 
     try {
       if (isEdit) {
@@ -524,10 +662,14 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
     Navigator.of(context).pop();
 
     _showAlarmToast(
-      alarmsEnabled
+      hasScheduledAlarm
           ? isEdit
                 ? '${newMed.name} updated · Alarm set for $alarmTimeLabel'
                 : 'Alarm set for $alarmTimeLabel'
+          : newMed.schedule.isEmpty
+          ? isEdit
+                ? '${newMed.name} updated · As needed, no timed alarm'
+                : 'Medicine saved · As needed, no timed alarm'
           : isEdit
           ? '${newMed.name} updated · Reminders are off'
           : 'Medication saved · Reminders are off',
@@ -562,7 +704,7 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
                     textAlign: TextAlign.center,
                     style: AppTheme.textStyle(
                       color: AppTheme.primaryForeground,
-                      fontSize: 14,
+                      fontSize: _usesLargeText ? 17 : 14,
                       fontWeight: FontWeight.w700,
                     ),
                   ),
@@ -806,7 +948,7 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
                     'CANCEL',
                     style: AppTheme.textStyle(
                       color: _formTextColor(context),
-                      fontSize: 14,
+                      fontSize: _usesLargeText ? 18 : 14,
                       fontWeight: FontWeight.bold,
                       letterSpacing: 1,
                     ),
@@ -827,43 +969,110 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: _formBorderColor(context), width: 1.2),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const SizedBox(width: 16),
-          Expanded(
-            child: TextField(
-              controller: _expirationCtrl,
-              keyboardType: TextInputType.datetime,
-              inputFormatters: [
-                FilteringTextInputFormatter.allow(RegExp(r'[0-9-]')),
-                LengthLimitingTextInputFormatter(10),
-              ],
-              decoration: const InputDecoration(
-                labelText: 'Expiration Date (optional)',
-                hintText: 'MM-DD-YYYY',
-                border: InputBorder.none,
-              ),
-              onChanged: (value) => setState(
-                () => _selectedExpirationDate =
-                    MedicineExpiryParser.parseManual(value),
-              ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: Text(
+              'Expiration month (optional)',
+              style: Theme.of(context).textTheme.labelMedium,
             ),
           ),
-          IconButton(
-            tooltip: 'Choose expiration date from calendar',
-            onPressed: _pickExpirationDate,
-            icon: const Icon(Icons.edit_calendar_rounded),
-            color: _formTextColor(context),
+          Row(
+            children: [
+              const SizedBox(width: 16),
+              Expanded(
+                child: TextField(
+                  controller: _expirationCtrl,
+                  keyboardType: TextInputType.datetime,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[0-9/]')),
+                    LengthLimitingTextInputFormatter(7),
+                  ],
+                  decoration: const InputDecoration(
+                    hintText: 'MM/YYYY',
+                    border: InputBorder.none,
+                  ),
+                  onChanged: (value) => setState(() {
+                    _expirationEdited = true;
+                    _scannedExpirationDate = null;
+                    _selectedExpirationDate = MedicineExpiryParser.parseManual(
+                      value,
+                    );
+                  }),
+                ),
+              ),
+              if (_expirationCtrl.text.isNotEmpty)
+                IconButton(
+                  tooltip: 'Clear expiration date',
+                  onPressed: () => setState(() {
+                    _expirationEdited = true;
+                    _scannedExpirationDate = null;
+                    _expirationCtrl.clear();
+                    _selectedExpirationDate = null;
+                  }),
+                  icon: const Icon(Icons.clear_rounded),
+                  color: _formTextColor(context),
+                ),
+            ],
           ),
-          if (_expirationCtrl.text.isNotEmpty)
-            IconButton(
-              tooltip: 'Clear expiration date',
-              onPressed: () => setState(() {
-                _expirationCtrl.clear();
-                _selectedExpirationDate = null;
-              }),
-              icon: const Icon(Icons.clear_rounded),
-              color: _formTextColor(context),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _pickExpirationDate,
+                    icon: const Icon(Icons.edit_calendar_rounded),
+                    label: const Text('Month'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: _formTextColor(context),
+                      minimumSize: Size.fromHeight(_usesLargeText ? 56 : 48),
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      textStyle: TextStyle(fontSize: _usesLargeText ? 18 : 15),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _scanExpirationDate,
+                    icon: const Icon(Icons.camera_alt_outlined),
+                    label: const Text('Scan EXP'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: _formTextColor(context),
+                      minimumSize: Size.fromHeight(_usesLargeText ? 56 : 48),
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      textStyle: TextStyle(fontSize: _usesLargeText ? 18 : 15),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (_scannedExpirationDate != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Text(
+                'Scanned expiration: ${MedicineExpiryParser.formatStored(_scannedExpirationDate!)}',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
+          if (!_expirationEdited &&
+              _originalExpirationDate != null &&
+              _originalExpirationDate!.day !=
+                  DateTime(
+                    _originalExpirationDate!.year,
+                    _originalExpirationDate!.month + 1,
+                    0,
+                  ).day)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Text(
+                'Exact date from scan: ${MedicineExpiryParser.formatStored(_originalExpirationDate!)}. Kept unless you change it.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
             ),
         ],
       ),
@@ -1108,7 +1317,7 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
               'Dosage',
               style: AppTheme.textStyle(
                 color: _formTextColor(context),
-                fontSize: 14,
+                fontSize: _usesLargeText ? 18 : 14,
                 fontWeight: FontWeight.bold,
               ),
             ),
@@ -1160,7 +1369,7 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
                   'Label: $_dosageStrength',
                   style: AppTheme.textStyle(
                     color: _formTextColor(context),
-                    fontSize: 14,
+                    fontSize: _usesLargeText ? 17 : 14,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
@@ -1173,7 +1382,7 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
           'Unit',
           style: AppTheme.textStyle(
             color: _formLabelColor(context),
-            fontSize: 14,
+            fontSize: _usesLargeText ? 18 : 14,
             fontWeight: FontWeight.bold,
           ),
         ),
@@ -1238,7 +1447,7 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
               minimumSize: const Size(48, 48),
               padding: const EdgeInsets.symmetric(horizontal: 4),
               textStyle: AppTheme.textStyle(
-                fontSize: 15,
+                fontSize: _usesLargeText ? 17 : 15,
                 fontWeight: FontWeight.w700,
               ),
             ),
@@ -1258,7 +1467,7 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
       return _dosageStrength!;
     }
     if (_dosageRaw != null && _dosageRaw!.isNotEmpty) return _dosageRaw!;
-    return rawText.isEmpty ? '—' : rawText;
+    return rawText.isEmpty ? 'Not set' : rawText;
   }
 
   Widget _buildInputGroup(
@@ -1274,7 +1483,7 @@ class _AddMedicationModalState extends State<AddMedicationModal> {
           label,
           style: AppTheme.textStyle(
             color: _formLabelColor(context),
-            fontSize: 14,
+            fontSize: _usesLargeText ? 18 : 14,
             fontWeight: FontWeight.bold,
           ),
         ),

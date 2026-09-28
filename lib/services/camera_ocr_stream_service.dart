@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
@@ -7,15 +8,19 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 
+import 'ocr_capture_stability_gate.dart';
+
 enum ScanHint { noTextFound, moveCloser, moveFurther, holdSteady }
 
-/// Owns the recognizer, but not [camera]. Initialize the camera with
-/// ResolutionPreset.veryHigh (1080p stills), NV21 on Android or BGRA8888 on iOS.
+/// Uses a supplied recognizer or owns one, but never owns [camera].
+/// Initialize the camera with NV21 on Android or BGRA8888 on iOS; the scan
+/// screen uses a 720p camera profile.
 /// YUV420 Android streams are also supported, including padded pixel strides.
 /// Preview OCR never touches disk. Only the final takePicture creates a file;
 /// ownership of that file passes to [onCapture]. Capture pauses the stream:
 /// call startStream again to scan another label. Await dispose before disposing
-/// the camera. Lifecycle methods must not be awaited from synchronous callbacks.
+/// the camera. Close a supplied recognizer after this service is disposed.
+/// Lifecycle methods must not be awaited from synchronous callbacks.
 class CameraOcrStreamService {
   CameraOcrStreamService({
     required this.camera,
@@ -23,12 +28,16 @@ class CameraOcrStreamService {
     required this.onCapture,
     required this.onError,
     this.onText,
+    TextRecognizer? textRecognizer,
     this.maxDimension = 1280,
     this.minSharpness = 100,
     this.minTextCoverageForGuidance = .03,
-    this.frameInterval = const Duration(milliseconds: 350),
+    this.frameInterval = const Duration(milliseconds: 150),
     this.hintInterval = const Duration(seconds: 3),
-  }) {
+  }) : _recognizer =
+           textRecognizer ??
+           TextRecognizer(script: TextRecognitionScript.latin),
+       _ownsRecognizer = textRecognizer == null {
     if (maxDimension < 64 ||
         minSharpness < 0 ||
         minTextCoverageForGuidance < 0 ||
@@ -54,23 +63,30 @@ class CameraOcrStreamService {
   final double minTextCoverageForGuidance;
   final Duration frameInterval;
   final Duration hintInterval;
-  final TextRecognizer _recognizer = TextRecognizer(
-    script: TextRecognitionScript.latin,
+  final TextRecognizer _recognizer;
+  final bool _ownsRecognizer;
+  late final OcrCaptureStabilityGate _captureGate = OcrCaptureStabilityGate(
+    minSharpness: minSharpness,
+    minTextCoverage: minTextCoverageForGuidance,
   );
   final Stopwatch _clock = Stopwatch()..start();
   Future<void> _lifecycle = Future<void>.value();
   Future<void>? _frame;
   Future<void>? _disposal;
+  CameraImage? _latestImage;
+  Timer? _frameTimer;
+  Isolate? _frameWorker;
+  ReceivePort? _frameResponses;
+  SendPort? _frameRequests;
+  Future<void>? _startingFrameWorker;
+  Completer<PreparedOcrFrame>? _pendingPreparation;
+  bool _frameWorkerExited = false;
   bool _running = false;
   bool _disposed = false;
-  bool _focusExposureLocked = false;
   int _generation = 0;
   Duration _lastFrame = Duration.zero;
   Duration _lastText = Duration.zero;
   Duration? _lastHint;
-  String? _stableText;
-  Rect? _stableBounds;
-  int _stableFrames = 0;
 
   bool get isRunning => _running;
 
@@ -92,26 +108,22 @@ class CameraOcrStreamService {
     }
     _lastText = _clock.elapsed;
     _lastHint = null;
-    _stableFrames = 0;
-    _stableText = null;
-    _stableBounds = null;
-    _focusExposureLocked = false;
-    await _unlockFocusAndExposure();
+    _captureGate.reset();
+    _clearLatestImage();
+    _lastFrame = _clock.elapsed - frameInterval;
     _running = true;
     final generation = ++_generation;
     try {
       await camera.startImageStream((image) {
-        if (!_running ||
-            generation != _generation ||
-            _frame != null ||
-            _clock.elapsed - _lastFrame < frameInterval) {
-          return;
-        }
-        _lastFrame = _clock.elapsed;
-        _frame = _process(image, generation).whenComplete(() => _frame = null);
+        if (!_current(generation)) return;
+        // Keep only the newest frame while OCR is busy, as in ML Kit's live
+        // camera sample. Old frames must never form a backlog.
+        _latestImage = image;
+        _processLatest(generation);
       });
     } catch (_) {
       _running = false;
+      _clearLatestImage();
       rethrow;
     }
   });
@@ -119,10 +131,12 @@ class CameraOcrStreamService {
   Future<void> stopStream() {
     _running = false;
     ++_generation;
+    _clearLatestImage();
     return _serialize(() async {
       // A queued start may have run since stop was requested.
       _running = false;
       ++_generation;
+      _clearLatestImage();
       await _frame;
       if (camera.value.isStreamingImages) await camera.stopImageStream();
     });
@@ -135,18 +149,125 @@ class CameraOcrStreamService {
     try {
       await stopStream();
     } finally {
-      await _recognizer.close();
+      _pendingPreparation?.completeError(
+        StateError('OCR frame worker disposed'),
+      );
+      _pendingPreparation = null;
+      _frameWorker?.kill(priority: Isolate.immediate);
+      _frameResponses?.close();
+      if (_ownsRecognizer) await _recognizer.close();
       _clock.stop();
+    }
+  }
+
+  Future<PreparedOcrFrame> _prepareFrame(OcrFrameRequest request) async {
+    await (_startingFrameWorker ??= _startFrameWorker());
+    if (_disposed || _frameRequests == null) {
+      throw StateError('OCR frame worker unavailable');
+    }
+    final pending = Completer<PreparedOcrFrame>();
+    _pendingPreparation = pending;
+    _frameRequests!.send(request);
+    try {
+      return await pending.future;
+    } finally {
+      if (identical(_pendingPreparation, pending)) _pendingPreparation = null;
+    }
+  }
+
+  Future<void> _startFrameWorker() async {
+    final responses = ReceivePort();
+    final ready = Completer<SendPort>();
+    _frameResponses = responses;
+    _frameWorkerExited = false;
+    responses.listen((message) {
+      if (message is SendPort) {
+        if (!ready.isCompleted) ready.complete(message);
+      } else if (message is List &&
+          message.length == 5 &&
+          message[0] is TransferableTypedData) {
+        final pending = _pendingPreparation;
+        if (pending != null && !pending.isCompleted) {
+          pending.complete(
+            PreparedOcrFrame(
+              (message[0] as TransferableTypedData).materialize().asUint8List(),
+              message[1] as int,
+              message[2] as int,
+              message[3] as bool,
+              message[4] as double,
+            ),
+          );
+        }
+      } else if (message is String) {
+        final pending = _pendingPreparation;
+        if (pending != null && !pending.isCompleted) {
+          pending.completeError(StateError(message));
+        }
+      } else if (message == null) {
+        _frameWorkerExited = true;
+        final error = StateError('OCR frame worker stopped');
+        if (!ready.isCompleted) ready.completeError(error);
+        final pending = _pendingPreparation;
+        if (pending != null && !pending.isCompleted) {
+          pending.completeError(error);
+        }
+        _frameRequests = null;
+      }
+    });
+    try {
+      _frameWorker = await Isolate.spawn(
+        _ocrFrameWorker,
+        responses.sendPort,
+        errorsAreFatal: true,
+        onExit: responses.sendPort,
+      );
+      _frameRequests = await ready.future;
+      if (_frameWorkerExited) {
+        throw StateError('OCR frame worker stopped during startup');
+      }
+    } catch (_) {
+      _frameRequests = null;
+      _frameWorker?.kill(priority: Isolate.immediate);
+      _frameWorker = null;
+      responses.close();
+      _frameResponses = null;
+      _startingFrameWorker = null;
+      rethrow;
     }
   }
 
   bool _current(int generation) =>
       !_disposed && _running && generation == _generation;
 
+  void _clearLatestImage() {
+    _latestImage = null;
+    _frameTimer?.cancel();
+    _frameTimer = null;
+  }
+
+  void _processLatest(int generation) {
+    if (!_current(generation) || _frame != null || _latestImage == null) return;
+    final wait = frameInterval - (_clock.elapsed - _lastFrame);
+    if (wait > Duration.zero) {
+      _frameTimer ??= Timer(wait, () {
+        _frameTimer = null;
+        _processLatest(generation);
+      });
+      return;
+    }
+    _frameTimer?.cancel();
+    _frameTimer = null;
+    final image = _latestImage!;
+    _latestImage = null;
+    _lastFrame = _clock.elapsed;
+    _frame = _process(image, generation).whenComplete(() {
+      _frame = null;
+      _processLatest(generation);
+    });
+  }
+
   void _hint(ScanHint hint) {
-    if (_lastHint != null &&
-        _clock.elapsed - _lastHint! < hintInterval &&
-        hint != ScanHint.holdSteady) {
+    if (_lastHint != null && _clock.elapsed - _lastHint! < hintInterval) {
       return;
     }
     _lastHint = _clock.elapsed;
@@ -156,8 +277,8 @@ class CameraOcrStreamService {
   Future<void> _process(CameraImage image, int generation) async {
     try {
       final rotation = _rotation();
-      // Packing and resize run off the UI isolate. Only one frame is in flight;
-      // new camera frames are dropped rather than queued behind native OCR.
+      // Packing and resize run on a persistent worker. Only one frame is in
+      // flight; new camera frames are dropped rather than queued behind OCR.
       final directNv21 =
           Platform.isAndroid &&
           image.format.group == ImageFormatGroup.nv21 &&
@@ -175,8 +296,7 @@ class CameraOcrStreamService {
               false,
               0,
             )
-          : await compute(
-              prepareOcrFrame,
+          : await _prepareFrame(
               OcrFrameRequest(
                 width: image.width,
                 height: image.height,
@@ -229,7 +349,7 @@ class CameraOcrStreamService {
           .map((b) => b.boundingBox)
           .toList();
       if (boxes.isEmpty) {
-        _stableFrames = 0;
+        _captureGate.miss(_clock.elapsed);
         if (_clock.elapsed - _lastText >= const Duration(seconds: 3)) {
           _hint(ScanHint.noTextFound);
         }
@@ -248,47 +368,33 @@ class CameraOcrStreamService {
             b.bottom > size.height - edgeMargin,
       );
       final coverage = ocrBoxCoverage(boxes, roi);
-      // Lock once useful text fills the target area. This prevents autofocus
-      // and auto-exposure from hunting while the two-frame stability check runs.
-      if (!_focusExposureLocked && coverage >= minTextCoverageForGuidance) {
-        _focusExposureLocked = true;
-        unawaited(_lockFocusAndExposure());
+      // Keep continuous focus and exposure while a hand-held label moves.
+      // Calculate sharpness on Android's direct path only when ML Kit has read
+      // medicine-like text, rather than on every preview frame.
+      var captureReady = false;
+      if (_hasMedicineSignal(text.text)) {
+        captureReady = _captureGate.observe(
+          text: text.text,
+          at: _clock.elapsed,
+          coverage: coverage,
+          clippedAtEdge: clippedAtEdge,
+          sharpness: directNv21
+              ? estimateLumaSharpness(frame.bytes, frame.width, frame.height)
+              : frame.sharpness,
+        );
+      } else {
+        _captureGate.miss(_clock.elapsed);
       }
-      final bounds = boxes.reduce((a, b) => a.expandToInclude(b));
-      final key = text.text
-          .toLowerCase()
-          .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
-          .trim();
-      final stable =
-          _similarText(key, _stableText) &&
-          _stableBounds != null &&
-          (bounds.center - _stableBounds!.center).distance <
-              size.shortestSide * .08 &&
-          (bounds.width - _stableBounds!.width).abs() < size.width * .12 &&
-          (bounds.height - _stableBounds!.height).abs() < size.height * .12;
-      _stableFrames = stable ? _stableFrames + 1 : 1;
-      _stableText = key;
-      _stableBounds = bounds;
-      // Two adjacent consistent reads are enough when they contain meaningful
-      // text or a sharp frame. Sharpness remains a quality guard for tiny OCR.
-      final captureReady =
-          _stableFrames >= 2 &&
-          (coverage >= minTextCoverageForGuidance ||
-              frame.sharpness >= minSharpness) &&
-          _hasMedicineSignal(text.text);
       if (!captureReady) {
-        // Distance hints are guidance only. They are suppressed while the
-        // text and position are settling, and never gate automatic capture.
-        if (!stable) {
-          if (clippedAtEdge) {
-            _hint(ScanHint.moveFurther);
-          } else if (coverage < minTextCoverageForGuidance) {
-            _hint(ScanHint.moveCloser);
-          }
+        if (_captureGate.shouldPromptHoldSteady) {
+          _hint(ScanHint.holdSteady);
+        } else if (clippedAtEdge) {
+          _hint(ScanHint.moveFurther);
+        } else if (coverage < minTextCoverageForGuidance) {
+          _hint(ScanHint.moveCloser);
         }
         return;
       }
-      _hint(ScanHint.holdSteady);
       if (!_current(generation)) return;
       await camera.stopImageStream();
       if (!_current(generation)) return;
@@ -298,11 +404,15 @@ class CameraOcrStreamService {
         return;
       }
       _running = false;
+      _clearLatestImage();
       onCapture(capture);
     } catch (error, stack) {
       if (!_disposed && generation == _generation) {
-        _stableFrames = 0;
-        if (!camera.value.isStreamingImages) _running = false;
+        _captureGate.reset();
+        // A failing frame format or worker would otherwise fail on every
+        // camera callback. Let the screen switch to still-image scanning.
+        _running = false;
+        _clearLatestImage();
         debugPrint('Camera OCR frame failed: $error');
         // Reporting errors must not create an unhandled asynchronous Future.
         try {
@@ -311,24 +421,6 @@ class CameraOcrStreamService {
           /* consumer error */
         }
       }
-    }
-  }
-
-  Future<void> _lockFocusAndExposure() async {
-    try {
-      await camera.setFocusMode(FocusMode.locked);
-      await camera.setExposureMode(ExposureMode.locked);
-    } on Object {
-      // Some camera backends do not support locking. OCR still proceeds.
-    }
-  }
-
-  Future<void> _unlockFocusAndExposure() async {
-    try {
-      await camera.setFocusMode(FocusMode.auto);
-      await camera.setExposureMode(ExposureMode.auto);
-    } on Object {
-      // Unsupported controls leave the camera in the backend's default mode.
     }
   }
 
@@ -348,42 +440,19 @@ class CameraOcrStreamService {
     return InputImageRotationValue.fromRawValue(degrees)!;
   }
 
-  bool _similarText(String current, String? previous) {
-    if (previous == null || current.isEmpty || previous.isEmpty) return false;
-    if (current == previous) return true;
-    final left = previous.length > 180 ? previous.substring(0, 180) : previous;
-    final right = current.length > 180 ? current.substring(0, 180) : current;
-    final longest = math.max(left.length, right.length);
-    if (longest < 4 || (left.length - right.length).abs() / longest > .15) {
-      return false;
-    }
+  bool _hasMedicineSignal(String text) {
+    final strength = RegExp(
+      r'\b\d+(?:[.,]\d+)?\s*(?:mg|mcg|\u03bcg|\u00b5g|ug|g|ml|iu|units?)\b',
+      caseSensitive: false,
+    ).hasMatch(text);
+    if (strength) return true;
 
-    var previousRow = List<int>.generate(left.length + 1, (i) => i);
-    for (var row = 1; row <= right.length; row++) {
-      final currentRow = List<int>.filled(left.length + 1, row);
-      var rowMinimum = row;
-      for (var column = 1; column <= left.length; column++) {
-        final substitution =
-            previousRow[column - 1] +
-            (right.codeUnitAt(row - 1) == left.codeUnitAt(column - 1) ? 0 : 1);
-        currentRow[column] = math.min(
-          substitution,
-          math.min(previousRow[column] + 1, currentRow[column - 1] + 1),
-        );
-        if (currentRow[column] < rowMinimum) {
-          rowMinimum = currentRow[column];
-        }
-      }
-      if (rowMinimum > math.max(2, (longest * .15).round())) return false;
-      previousRow = currentRow;
-    }
-    return previousRow[left.length] <= math.max(2, (longest * .15).round());
+    // Some package faces show the medicine name in the camera ROI while the
+    // strength is on a side panel. Let stable label text reach the capture
+    // gate; full-resolution OCR and the parser still validate the image.
+    final words = RegExp(r'[a-z]{4,}', caseSensitive: false).allMatches(text);
+    return text.trim().length >= 10 && words.length >= 2;
   }
-
-  bool _hasMedicineSignal(String text) => RegExp(
-    r'\b\d+(?:[.,]\d+)?\s*(?:mg|mcg|μg|ug|g|ml|mL|iu|units?)\b',
-    caseSensitive: false,
-  ).hasMatch(text);
 }
 
 @visibleForTesting
@@ -423,6 +492,49 @@ class PreparedOcrFrame {
   final int width, height;
   final bool bgra;
   final double sharpness;
+}
+
+/// Estimate focus from a tightly packed luminance plane. The Android fast
+/// path calls this only for stable, sparse reads.
+@visibleForTesting
+double estimateLumaSharpness(Uint8List bytes, int width, int height) {
+  if (width < 3 || height < 3 || bytes.length < width * height) return 0;
+  double sum = 0, squares = 0;
+  var count = 0;
+  for (var y = 1; y < height - 1; y += 2) {
+    for (var x = 1; x < width - 1; x += 2) {
+      final i = y * width + x;
+      final value =
+          bytes[i - 1] +
+          bytes[i + 1] +
+          bytes[i - width] +
+          bytes[i + width] -
+          4 * bytes[i];
+      sum += value;
+      squares += value * value;
+      count++;
+    }
+  }
+  return math.max(0, squares / count - math.pow(sum / count, 2)).toDouble();
+}
+
+void _ocrFrameWorker(SendPort host) {
+  final requests = ReceivePort();
+  host.send(requests.sendPort);
+  requests.listen((message) {
+    try {
+      final frame = prepareOcrFrame(message as OcrFrameRequest);
+      host.send([
+        TransferableTypedData.fromList([frame.bytes]),
+        frame.width,
+        frame.height,
+        frame.bgra,
+        frame.sharpness,
+      ]);
+    } catch (error) {
+      host.send(error.toString());
+    }
+  });
 }
 
 /// Broad central target (96% width, 92% height) retains names and directions
@@ -489,21 +601,7 @@ PreparedOcrFrame prepareOcrFrame(OcrFrameRequest source) {
       }
     }
   }
-  double sum = 0, squares = 0;
-  var count = 0;
-  for (var y = 1; y < h - 1; y += 2) {
-    for (var x = 1; x < w - 1; x += 2) {
-      final i = y * w + x;
-      final value =
-          luma[i - 1] + luma[i + 1] + luma[i - w] + luma[i + w] - 4 * luma[i];
-      sum += value;
-      squares += value * value;
-      count++;
-    }
-  }
-  final sharpness = count == 0
-      ? 0.0
-      : math.max(0.0, squares / count - math.pow(sum / count, 2));
+  final sharpness = estimateLumaSharpness(luma, w, h);
   // The iOS byte bridge ignores rotation metadata. Rotate BGRA pixels instead.
   if (bgra && source.rotation != 0) {
     final angle = source.rotation;

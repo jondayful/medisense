@@ -49,6 +49,13 @@ class _PatientGuardianHomeCardState extends State<PatientGuardianHomeCard> {
     return names;
   }
 
+  Future<void> _openGuardian() async {
+    await context.push('/guardian');
+    if (!mounted || _patientId == null) return;
+    final auth = context.read<AuthProvider>();
+    setState(() => _guardians = _loadGuardians(_patientId!, auth.userEmail));
+  }
+
   @override
   Widget build(BuildContext context) {
     final accent = AppTheme.actionColor(context);
@@ -59,6 +66,49 @@ class _PatientGuardianHomeCardState extends State<PatientGuardianHomeCard> {
       builder: (context, snapshot) {
         final guardians = snapshot.data ?? const <String>[];
         final connected = guardians.isNotEmpty;
+        if (connected) {
+          return Card(
+            margin: EdgeInsets.zero,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(20),
+              onTap: _openGuardian,
+              child: Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: widget.large ? 18 : 16,
+                  vertical: widget.large ? 14 : 12,
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.people_rounded, color: accent, size: 26),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'YOUR GUARDIAN',
+                            style: AppTheme.microLabel(color: accent),
+                          ),
+                          Text(
+                            guardians.join(', '),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppTheme.textStyle(
+                              fontSize: widget.large ? 19 : 16,
+                              fontWeight: FontWeight.w700,
+                              color: primary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Icon(Icons.chevron_right_rounded),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }
         return Card(
           margin: EdgeInsets.zero,
           shape: RoundedRectangleBorder(
@@ -118,18 +168,7 @@ class _PatientGuardianHomeCardState extends State<PatientGuardianHomeCard> {
                 ),
                 const SizedBox(height: 12),
                 OutlinedButton.icon(
-                  onPressed: () async {
-                    await context.push('/guardian');
-                    if (mounted && _patientId != null) {
-                      final auth = this.context.read<AuthProvider>();
-                      setState(
-                        () => _guardians = _loadGuardians(
-                          _patientId!,
-                          auth.userEmail,
-                        ),
-                      );
-                    }
-                  },
+                  onPressed: _openGuardian,
                   icon: const Icon(Icons.manage_accounts_rounded),
                   label: const Text('Manage Guardian'),
                 ),

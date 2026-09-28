@@ -111,23 +111,52 @@ class ScanSpeechParser {
     int minute = 0;
     int start = -1;
     int end = -1;
-    final numeric = RegExp(
-      r'\b(\d{1,2})(?::(\d{2}))?\s*(a\s*m|am|p\s*m|pm)?\b',
-    ).firstMatch(normalized);
+    // Prefer a complete clock over an unrelated number earlier in a command
+    // (for example, a pill count before "at 7 39 PM"). Vosk often returns
+    // spoken digits separated by spaces instead of a colon.
+    final numeric =
+        RegExp(
+          r'\b(\d{1,2}):(\d{1,2})(?:\s*(a\s*m|am|p\s*m|pm))?\b',
+        ).firstMatch(normalized) ??
+        RegExp(
+          r'\b(\d{1,2})\s+(\d{1,2})(?:\s*(a\s*m|am|p\s*m|pm))?\b',
+        ).firstMatch(normalized) ??
+        RegExp(r'\b(\d{1,2})\s*(a\s*m|am|p\s*m|pm)\b').firstMatch(normalized) ??
+        RegExp(r'\b(\d{1,2})\b').firstMatch(normalized);
 
     if (numeric != null) {
       hour = int.tryParse(numeric.group(1)!);
-      minute = int.tryParse(numeric.group(2) ?? '0') ?? 0;
+      final minuteGroup = numeric.groupCount == 3 ? numeric.group(2) : null;
+      minute = int.tryParse(minuteGroup ?? '0') ?? 0;
       start = numeric.start;
       end = numeric.end;
+      if (numeric.groupCount == 1) {
+        final spokenMinute = _minuteAfter(normalized.substring(end));
+        if (spokenMinute != null) {
+          minute = spokenMinute.$1;
+          end += spokenMinute.$2;
+        }
+      }
     } else {
+      RegExpMatch? hourMatch;
       for (final entry in _hourWords.entries) {
         final match = RegExp('\\b${entry.key}\\b').firstMatch(normalized);
         if (match == null) continue;
-        hour = entry.value;
-        start = match.start;
-        end = match.end;
-        break;
+        if (hourMatch == null ||
+            match.start < hourMatch.start ||
+            (match.start == hourMatch.start && match.end > hourMatch.end)) {
+          hour = entry.value;
+          hourMatch = match;
+        }
+      }
+      if (hourMatch != null) {
+        start = hourMatch.start;
+        end = hourMatch.end;
+        final spokenMinute = _minuteAfter(normalized.substring(end));
+        if (spokenMinute != null) {
+          minute = spokenMinute.$1;
+          end += spokenMinute.$2;
+        }
       }
       // "Ngayon" / "now" means schedule the dose at the current local time.
       // Prefer an explicit spoken hour if the user says both.
@@ -135,8 +164,12 @@ class ScanSpeechParser {
           RegExp(r'\b(ngayon|now|right now)\b').hasMatch(normalized)) {
         final now = TimeOfDay.now();
         return (
-          start: RegExp(r'\b(ngayon|now|right now)\b').firstMatch(normalized)!.start,
-          end: RegExp(r'\b(ngayon|now|right now)\b').firstMatch(normalized)!.end,
+          start: RegExp(
+            r'\b(ngayon|now|right now)\b',
+          ).firstMatch(normalized)!.start,
+          end: RegExp(
+            r'\b(ngayon|now|right now)\b',
+          ).firstMatch(normalized)!.end,
           time: TimeOfDay(hour: now.hour, minute: now.minute),
         );
       }
@@ -147,7 +180,9 @@ class ScanSpeechParser {
     final explicitMidnight = RegExp(
       r'\b(midnight|hatinggabi|hating gabi|madaling araw)\b',
     ).hasMatch(normalized);
-    final numericPeriod = numeric?.group(3)?.replaceAll(' ', '');
+    final numericPeriod = numeric
+        ?.group(numeric.groupCount)
+        ?.replaceAll(' ', '');
     final explicitPm =
         numericPeriod == 'pm' ||
         RegExp(
@@ -176,6 +211,96 @@ class ScanSpeechParser {
   }
 
   static TimeOfDay? timeFromSpeech(String? text) => timeIn(text)?.time;
+
+  static (int, int)? _minuteAfter(String tail) {
+    final match = RegExp(
+      r'^\s+(?:(?:and|at|ng|y)\s+)?(?:(oh|o|zero)\s+)?([a-z]+)(?:\s+(?:and|y)\s+|\s+)?([a-z]+)?',
+    ).firstMatch(tail);
+    if (match == null) return null;
+    final first = match.group(2)!;
+    final second = match.group(3);
+    final one = _minuteOnes[first];
+    final teen = _minuteTeens[first];
+    final tens = _minuteTens[first];
+    int? minute;
+    var end = match.end;
+    if (tens != null) {
+      final unit = second == null ? null : _minuteOnes[second];
+      minute = tens + (unit ?? 0);
+      if (unit == null && second != null) {
+        end = match.start + match.group(0)!.lastIndexOf(first) + first.length;
+      }
+    } else if (teen != null) {
+      minute = teen;
+      if (second != null) {
+        end = match.start + match.group(0)!.lastIndexOf(first) + first.length;
+      }
+    } else if (one != null && match.group(1) != null) {
+      minute = one;
+      if (second != null) {
+        end = match.start + match.group(0)!.lastIndexOf(first) + first.length;
+      }
+    }
+    return minute == null ? null : (minute, end);
+  }
+
+  static const _minuteOnes = <String, int>{
+    'one': 1,
+    'two': 2,
+    'three': 3,
+    'four': 4,
+    'five': 5,
+    'six': 6,
+    'seven': 7,
+    'eight': 8,
+    'nine': 9,
+    'isa': 1,
+    'dalawa': 2,
+    'tatlo': 3,
+    'apat': 4,
+    'lima': 5,
+    'anim': 6,
+    'pito': 7,
+    'walo': 8,
+    'siyam': 9,
+    'uno': 1,
+    'dos': 2,
+    'tres': 3,
+    'kwatro': 4,
+    'singko': 5,
+    'sais': 6,
+    'syete': 7,
+    'siyete': 7,
+    'otso': 8,
+    'nuwebe': 9,
+    'nuebe': 9,
+    'nueve': 9,
+  };
+  static const _minuteTeens = <String, int>{
+    'ten': 10,
+    'eleven': 11,
+    'twelve': 12,
+    'thirteen': 13,
+    'fourteen': 14,
+    'fifteen': 15,
+    'sixteen': 16,
+    'seventeen': 17,
+    'eighteen': 18,
+    'nineteen': 19,
+  };
+  static const _minuteTens = <String, int>{
+    'twenty': 20,
+    'thirty': 30,
+    'forty': 40,
+    'fifty': 50,
+    'bente': 20,
+    'veinte': 20,
+    'trenta': 30,
+    'treinta': 30,
+    'kwarenta': 40,
+    'kuwarenta': 40,
+    'singkwenta': 50,
+  };
 
   static String _normalize(String? text) {
     if (text == null) return '';

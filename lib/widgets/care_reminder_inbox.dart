@@ -87,6 +87,7 @@ class _CareReminderInboxState extends State<CareReminderInbox>
     final accent = Theme.of(context).brightness == Brightness.dark
         ? AppTheme.darkAccentGreen
         : AppTheme.accentGreen;
+    final large = widget.large;
     return FutureBuilder<List<Map<String, dynamic>>>(
       future: _reminders,
       builder: (context, snapshot) {
@@ -102,24 +103,41 @@ class _CareReminderInboxState extends State<CareReminderInbox>
         }
         return Container(
           width: double.infinity,
-          padding: EdgeInsets.all(widget.large ? 20 : 16),
+          padding: EdgeInsets.all(large ? 20 : 16),
           decoration: BoxDecoration(
-            color: AppTheme.surfaceColor(context),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: AppTheme.borderColor(context)),
+            color: Theme.of(context).brightness == Brightness.dark
+                ? AppTheme.darkCardSurface
+                : const Color(0xFFF2F5EF),
+            borderRadius: BorderRadius.circular(large ? 22 : 18),
+            border: Border.all(
+              color: accent.withValues(alpha: .55),
+              width: 1.3,
+            ),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
                 children: [
-                  Icon(Icons.notifications_active_outlined, color: accent),
-                  const SizedBox(width: 9),
+                  Container(
+                    width: large ? 44 : 36,
+                    height: large ? 44 : 36,
+                    decoration: BoxDecoration(
+                      color: accent.withValues(alpha: .16),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      Icons.notifications_active_outlined,
+                      color: accent,
+                      size: large ? 25 : 21,
+                    ),
+                  ),
+                  SizedBox(width: large ? 12 : 9),
                   Expanded(
                     child: Text(
                       'Guardian reminders',
                       style: AppTheme.textStyle(
-                        fontSize: widget.large ? 21 : 16,
+                        fontSize: large ? 23 : 16,
                         fontWeight: FontWeight.w700,
                         color: primary,
                       ),
@@ -127,41 +145,93 @@ class _CareReminderInboxState extends State<CareReminderInbox>
                   ),
                 ],
               ),
-              const SizedBox(height: 8),
+              SizedBox(height: large ? 12 : 8),
               ...snapshot.data!.take(3).map((reminder) {
                 final medId = reminder['medication_id']?.toString();
                 final matches = meds.where((med) => med.id == medId);
                 final med = matches.isEmpty ? null : matches.first;
+                final rawGuardianName = reminder['guardian_name']
+                    ?.toString()
+                    .trim();
                 final guardianName =
-                    reminder['guardian_name']?.toString().split(' ').first ??
-                    'Guardian';
+                    rawGuardianName == null || rawGuardianName.isEmpty
+                    ? 'Your guardian'
+                    : rawGuardianName.split(RegExp(r'\s+')).first;
+                final scheduleId = reminder['schedule_id']?.toString();
+                final scheduleMatches = med?.schedule.where(
+                  (item) => item.id == scheduleId,
+                );
+                final schedule =
+                    scheduleMatches == null || scheduleMatches.isEmpty
+                    ? null
+                    : scheduleMatches.first;
                 final sentAt = DateTime.tryParse(
                   reminder['created_at']?.toString() ?? '',
                 )?.toLocal();
-                final detail = med?.name ?? 'medicine';
                 return Padding(
-                  padding: const EdgeInsets.only(top: 10),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '$guardianName is reminding you.\nTake your $detail',
-                        style: AppTheme.textStyle(
-                          fontSize: widget.large ? 18 : 14,
-                          fontWeight: FontWeight.w700,
-                          color: primary,
+                  padding: EdgeInsets.only(top: large ? 12 : 10),
+                  child: Container(
+                    width: double.infinity,
+                    padding: EdgeInsets.all(large ? 16 : 12),
+                    decoration: BoxDecoration(
+                      color: AppTheme.surfaceColor(context),
+                      borderRadius: BorderRadius.circular(large ? 18 : 14),
+                      border: Border.all(color: AppTheme.borderColor(context)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '$guardianName sent a dose reminder',
+                          style: AppTheme.textStyle(
+                            fontSize: large ? 18 : 14,
+                            fontWeight: FontWeight.w700,
+                            color: primary,
+                          ),
                         ),
-                      ),
-                      Text(
-                        sentAt == null
-                            ? 'Reminder received'
-                            : DateFormat.MMMd().add_jm().format(sentAt),
-                        style: AppTheme.textStyle(
-                          fontSize: widget.large ? 16 : 12,
-                          color: muted,
+                        const SizedBox(height: 5),
+                        Text(
+                          med?.name ?? 'Scheduled medicine',
+                          style: AppTheme.textStyle(
+                            fontSize: large ? 23 : 17,
+                            fontWeight: FontWeight.w700,
+                            height: 1.25,
+                            color: primary,
+                          ),
                         ),
-                      ),
-                    ],
+                        if (med?.dosage.trim().isNotEmpty ?? false) ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            med!.dosage,
+                            style: AppTheme.textStyle(
+                              fontSize: large ? 19 : 14,
+                              color: muted,
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 7),
+                        Text(
+                          schedule == null
+                              ? 'Dose time unavailable'
+                              : 'Scheduled dose: ${schedule.formattedTime}',
+                          style: AppTheme.textStyle(
+                            fontSize: large ? 19 : 14,
+                            fontWeight: FontWeight.w600,
+                            color: accent,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          sentAt == null
+                              ? 'Reminder received'
+                              : 'Received ${DateFormat.MMMd().add_jm().format(sentAt)}',
+                          style: AppTheme.textStyle(
+                            fontSize: large ? 16 : 12,
+                            color: muted,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 );
               }),

@@ -9,6 +9,7 @@ import '../models/medication.dart';
 
 import '../widgets/add_medication_modal.dart';
 import '../services/accessibility_feedback.dart';
+import '../services/medicine_expiry_parser.dart';
 
 class MedicationDetailScreen extends StatelessWidget {
   final String medicationId;
@@ -200,7 +201,9 @@ class MedicationDetailScreen extends StatelessWidget {
                           label: 'Expiration',
                           value: medication.expirationDate == null
                               ? 'Not recorded'
-                              : '${medication.expirationDate!.month}/${medication.expirationDate!.day}/${medication.expirationDate!.year}',
+                              : MedicineExpiryParser.formatStored(
+                                  medication.expirationDate!,
+                                ),
                           valueColor: medication.isExpired ? errorColor : null,
                         ),
                         if (medication.isExpired)

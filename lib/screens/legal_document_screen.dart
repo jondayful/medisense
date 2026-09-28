@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../models/accessibility_mode.dart';
+import '../providers/app_state_provider.dart';
 import '../theme/app_theme.dart';
 
 enum LegalDocumentType { terms, privacy }
@@ -13,6 +16,10 @@ class LegalDocumentScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final accessible = context
+        .watch<AppStateProvider>()
+        .accessibilityMode
+        .usesLargeText;
     final title = _isTerms ? 'Terms of Service' : 'Privacy Policy';
     final bodyColor = isDark
         ? AppTheme.darkTextSecondary
@@ -25,12 +32,17 @@ class LegalDocumentScreen extends StatelessWidget {
       appBar: AppBar(title: Text(title)),
       body: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(24, 24, 24, 40),
+          padding: EdgeInsets.fromLTRB(
+            accessible ? 20 : 24,
+            24,
+            accessible ? 20 : 24,
+            40,
+          ),
           children: [
             Text(
               title,
               style: AppTheme.textStyle(
-                fontSize: 30,
+                fontSize: accessible ? 36 : 30,
                 fontWeight: FontWeight.w800,
                 color: headingColor,
               ),
@@ -38,7 +50,10 @@ class LegalDocumentScreen extends StatelessWidget {
             const SizedBox(height: 8),
             Text(
               'Last updated: September 27, 2026',
-              style: AppTheme.textStyle(fontSize: 14, color: bodyColor),
+              style: AppTheme.textStyle(
+                fontSize: accessible ? 17 : 14,
+                color: bodyColor,
+              ),
             ),
             const SizedBox(height: 24),
             ...(_isTerms ? _terms : _privacy).map(
@@ -47,6 +62,7 @@ class LegalDocumentScreen extends StatelessWidget {
                 text: section.$2,
                 headingColor: headingColor,
                 bodyColor: bodyColor,
+                accessible: accessible,
               ),
             ),
             const SizedBox(height: 16),
@@ -59,7 +75,7 @@ class LegalDocumentScreen extends StatelessWidget {
               child: Text(
                 'MediSense is a medication organization tool. Check the label and your clinician’s instructions before taking a dose.',
                 style: AppTheme.textStyle(
-                  fontSize: 14,
+                  fontSize: accessible ? 18 : 14,
                   fontWeight: FontWeight.w600,
                   color: bodyColor,
                   height: 1.4,
@@ -152,12 +168,14 @@ class _LegalSection extends StatelessWidget {
   final String text;
   final Color headingColor;
   final Color bodyColor;
+  final bool accessible;
 
   const _LegalSection({
     required this.heading,
     required this.text,
     required this.headingColor,
     required this.bodyColor,
+    required this.accessible,
   });
 
   @override
@@ -170,7 +188,7 @@ class _LegalSection extends StatelessWidget {
           Text(
             heading,
             style: AppTheme.textStyle(
-              fontSize: 20,
+              fontSize: accessible ? 24 : 20,
               fontWeight: FontWeight.w800,
               color: headingColor,
             ),
@@ -179,7 +197,7 @@ class _LegalSection extends StatelessWidget {
           Text(
             text,
             style: AppTheme.textStyle(
-              fontSize: 16,
+              fontSize: accessible ? 19 : 16,
               color: bodyColor,
               height: 1.5,
             ),

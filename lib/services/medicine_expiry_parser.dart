@@ -14,22 +14,48 @@ class MedicineExpiryInfo {
   bool get isExpired => effectiveExpirationDate.isBefore(DateTime.now());
 }
 
+class MedicineExpiryScanCandidate {
+  const MedicineExpiryScanCandidate({
+    required this.info,
+    required this.recognizedText,
+    required this.hasExpiryLabel,
+  });
+
+  final MedicineExpiryInfo info;
+  final String recognizedText;
+  final bool hasExpiryLabel;
+}
+
 class MedicineExpiryParser {
   /// Manual entry is intentionally unambiguous and stricter than OCR input.
   static DateTime? parseManual(String value) {
-    if (!RegExp(r'^\d{2}-\d{2}-\d{4}$').hasMatch(value)) return null;
+    if (!RegExp(r'^\d{2}/\d{4}$').hasMatch(value)) return null;
     final month = int.parse(value.substring(0, 2));
-    final day = int.parse(value.substring(3, 5));
-    final year = int.parse(value.substring(6, 10));
-    if (year < 2000 || year > 2100) return null;
-    final parsed = DateTime(year, month, day);
-    return parsed.year == year && parsed.month == month && parsed.day == day
-        ? parsed
-        : null;
+    final year = int.parse(value.substring(3, 7));
+    if (year < 2000 || year > 2100 || month < 1 || month > 12) return null;
+    return DateTime(year, month + 1, 0, 23, 59, 59);
+  }
+
+  /// Keep an exact day when the package provided one; month-only dates use
+  /// the final day of that month in storage.
+  static String formatStored(DateTime date) {
+    final month = date.month.toString().padLeft(2, '0');
+    final year = date.year.toString().padLeft(4, '0');
+    final endOfMonth = DateTime(date.year, date.month + 1, 0).day;
+    if (date.day == endOfMonth) return '$month/$year';
+    return '$month/${date.day.toString().padLeft(2, '0')}/$year';
   }
 
   static final RegExp _anchor = RegExp(
-    r'\b(?:exp(?:iration|iry)?|expires?|use\s*by|best\s*before)\b',
+    r'\b(?:exp(?:iration|iry)?|expires?|use\s*by|best\s*before)(?:[\s.:_-]*date)?\b',
+    caseSensitive: false,
+  );
+  static final RegExp _nonExpiryLabel = RegExp(
+    r'\b(?:lot|batch|mfg|mfd|manufactur(?:ed|ing|e)?|prod(?:uced|uction)?|packed|packing)\b',
+    caseSensitive: false,
+  );
+  static final RegExp _isolatedMonthYear = RegExp(
+    r'^(?:[A-Z]{3,9}[\s./-]+\d{2,4}|\d{2,4}[\s./-]+[A-Z]{3,9}|\d{1,4}[\s./-]+\d{1,4}|\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})$',
     caseSensitive: false,
   );
   static final RegExp _numericDate = RegExp(
@@ -57,6 +83,61 @@ class MedicineExpiryParser {
   };
 
   const MedicineExpiryParser._();
+
+  /// The dedicated date camera may read an isolated month/year even when the
+  /// package has no EXP label. The general label parser remains label-only.
+  /// The caller must show each candidate for human confirmation.
+  static List<MedicineExpiryScanCandidate> scanCandidates(String source) {
+    final labelled = parse(source);
+    if (labelled != null) {
+      return [
+        MedicineExpiryScanCandidate(
+          info: labelled,
+          recognizedText: format(labelled),
+          hasExpiryLabel: true,
+        ),
+      ];
+    }
+
+    final candidates = <MedicineExpiryScanCandidate>[];
+    final seen = <String>{};
+    var previousLineWasNonExpiryLabel = false;
+    for (final sourceLine in source.split(RegExp(r'[\r\n]+'))) {
+      final line = sourceLine.trim().replaceAll(
+        RegExp(r'^[\s:;#=._-]+|[\s:;#=._-]+$'),
+        '',
+      );
+      if (line.isEmpty) continue;
+      final isNonExpiryLine = _nonExpiryLabel.hasMatch(line);
+      if (isNonExpiryLine) {
+        previousLineWasNonExpiryLabel = true;
+        continue;
+      }
+      if (_isolatedMonthYear.hasMatch(line) && !previousLineWasNonExpiryLabel) {
+        var dateText = line.toUpperCase();
+        final yearFirstNamed = RegExp(
+          r'^(\d{2,4})[\s./-]+([A-Z]{3,9})$',
+        ).firstMatch(dateText);
+        if (yearFirstNamed != null) {
+          dateText = '${yearFirstNamed.group(2)} ${yearFirstNamed.group(1)}';
+        } else if (RegExp(r'^\d{1,4}\s+\d{1,4}$').hasMatch(dateText)) {
+          dateText = dateText.replaceFirst(RegExp(r'\s+'), '/');
+        }
+        final info = parse('EXP $dateText');
+        if (info != null && seen.add(format(info))) {
+          candidates.add(
+            MedicineExpiryScanCandidate(
+              info: info,
+              recognizedText: line,
+              hasExpiryLabel: false,
+            ),
+          );
+        }
+      }
+      previousLineWasNonExpiryLabel = false;
+    }
+    return candidates;
+  }
 
   static MedicineExpiryInfo? parse(String source) {
     final anchor = _anchor.firstMatch(source);
@@ -122,8 +203,19 @@ class MedicineExpiryParser {
       month = int.tryParse(numeric.group(5)!);
       day = int.tryParse(numeric.group(6) ?? '');
     } else {
-      month = int.tryParse(numeric.group(7)!);
-      year = _year(numeric.group(8));
+      final first = int.tryParse(numeric.group(7)!);
+      final second = int.tryParse(numeric.group(8)!);
+      if (first != null &&
+          first > 12 &&
+          first < 100 &&
+          second != null &&
+          second <= 12) {
+        year = _year(numeric.group(7));
+        month = second;
+      } else {
+        month = first;
+        year = _year(numeric.group(8));
+      }
     }
     if (year == null || month == null) return null;
     return _build(year, month, day);
@@ -153,22 +245,8 @@ class MedicineExpiryParser {
   }
 
   static String format(MedicineExpiryInfo info) {
-    const months = [
-      'January',
-      'February',
-      'March',
-      'April',
-      'May',
-      'June',
-      'July',
-      'August',
-      'September',
-      'October',
-      'November',
-      'December',
-    ];
     return info.hasDay
-        ? '${months[info.date.month - 1]} ${info.date.day}, ${info.date.year}'
-        : '${months[info.date.month - 1]} ${info.date.year}';
+        ? '${info.date.month.toString().padLeft(2, '0')}/${info.date.day.toString().padLeft(2, '0')}/${info.date.year}'
+        : '${info.date.month.toString().padLeft(2, '0')}/${info.date.year}';
   }
 }

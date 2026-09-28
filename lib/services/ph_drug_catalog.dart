@@ -102,8 +102,8 @@ class PhDrugCatalog {
   bool _loaded = false;
   bool _loadFailed = false;
   List<PhDrugProduct> _products = const [];
-  final Map<String, List<_AliasRecord>> _aliases = {};
-  final Map<String, List<_AliasRecord>> _prefixes = {};
+  Map<String, List<_AliasRecord>> _aliases = {};
+  Map<String, List<_AliasRecord>> _prefixes = {};
   static const _genericSalts = {
     'hydrochloride',
     'hcl',
@@ -151,21 +151,13 @@ class PhDrugCatalog {
       final transferable = TransferableTypedData.fromList([
         compressed.buffer.asUint8List(),
       ]);
-      final decoded = await Isolate.run(() => _decodeCatalog(transferable));
-      if (decoded is! List) {
-        throw const FormatException('Catalog is not a list');
-      }
-
-      final products = <PhDrugProduct>[];
-      for (final item in decoded) {
-        if (item is! Map) continue;
-        final product = PhDrugProduct.fromJson(Map<String, dynamic>.from(item));
-        if (product.genericName.isEmpty && product.brandName.isEmpty) continue;
-        products.add(product);
-        _addAlias(product.genericName, _AliasRecord(product, false));
-        _addAlias(product.brandName, _AliasRecord(product, true));
-      }
-      _products = products;
+      // Decoding alone is not enough: building 34,000+ products and their
+      // alias indexes also blocks the UI isolate for a noticeable interval.
+      // Isolate.run transfers the completed index back when its worker exits.
+      final index = await Isolate.run(() => _decodeAndIndex(transferable));
+      _products = index._products;
+      _aliases = index._aliases;
+      _prefixes = index._prefixes;
       _loaded = true;
     } catch (_) {
       // A missing/corrupt catalog must never block ML Kit OCR or manual entry.
@@ -353,7 +345,22 @@ class PhDrugCatalog {
   }
 }
 
-Object? _decodeCatalog(TransferableTypedData compressed) {
+PhDrugCatalog _decodeAndIndex(TransferableTypedData compressed) {
   final bytes = compressed.materialize().asUint8List();
-  return jsonDecode(utf8.decode(GZipDecoder().decodeBytes(bytes)));
+  final decoded = jsonDecode(utf8.decode(GZipDecoder().decodeBytes(bytes)));
+  if (decoded is! List) {
+    throw const FormatException('Catalog is not a list');
+  }
+  final index = PhDrugCatalog._();
+  final products = <PhDrugProduct>[];
+  for (final item in decoded) {
+    if (item is! Map) continue;
+    final product = PhDrugProduct.fromJson(Map<String, dynamic>.from(item));
+    if (product.genericName.isEmpty && product.brandName.isEmpty) continue;
+    products.add(product);
+    index._addAlias(product.genericName, _AliasRecord(product, false));
+    index._addAlias(product.brandName, _AliasRecord(product, true));
+  }
+  index._products = products;
+  return index;
 }

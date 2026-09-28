@@ -7,6 +7,17 @@ class OcrTextCleanup {
 
   final Set<String> dictionary;
 
+  /// Joins line-break hyphenation only when the result is a known medicine.
+  /// This corrects reads such as `Parace-tamol` without changing ordinary
+  /// compound words such as `long-term`.
+  String joinKnownHyphenatedMedicineWords(String source) =>
+      source.replaceAllMapped(RegExp(r'\b([A-Za-z]{2,})-\s*([A-Za-z]{2,})\b'), (
+        match,
+      ) {
+        final joined = '${match[1]}${match[2]}';
+        return dictionary.contains(joined.toLowerCase()) ? joined : match[0]!;
+      });
+
   static const Set<String> _defaultDictionary = {
     'acetaminophen',
     'ambroxol',
@@ -46,7 +57,7 @@ class OcrTextCleanup {
   };
 
   OcrCleanupResult clean(String source) {
-    var text = source.replaceAllMapped(
+    var text = joinKnownHyphenatedMedicineWords(source).replaceAllMapped(
       RegExp(r'([A-Za-z]{3,})[ \t]*\r?\n[ \t]*([A-Za-z]{1,3})\b'),
       (match) {
         final joined = '${match[1]}${match[2]}';

@@ -49,6 +49,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     // onboarding name.
     if (appState.savedUserId != null && !authProvider.isLoggedIn) return;
     _hasGreeted = true;
+    if (appState.ttsVerbosity == TtsVerbosity.essential) return;
     final next = _findNextDose(provider);
     final name = resolveGreetingName([
       if (authProvider.isLoggedIn) authProvider.userName,
@@ -57,12 +58,29 @@ class _DashboardScreenState extends State<DashboardScreen>
     ]);
     final englishGreeting = name == null ? 'Hello' : 'Hello $name';
     final filipinoGreeting = name == null ? 'Kumusta' : 'Kumusta, $name';
-    final english = next == null
+    var english = authProvider.isGuardian
+        ? '$englishGreeting. Here is your care dashboard.'
+        : next == null
         ? '$englishGreeting. You have no medicine scheduled right now.'
         : '$englishGreeting. Take ${next.med.name} at ${next.s.formattedTime}.';
-    final filipino = next == null
+    var filipino = authProvider.isGuardian
+        ? '$filipinoGreeting. Narito ang iyong care dashboard.'
+        : next == null
         ? '$filipinoGreeting. Wala kang nakatakdang gamot sa ngayon.'
         : '$filipinoGreeting. Inumin ang ${next.med.name} sa ${next.s.formattedTime}.';
+    if (appState.ttsVerbosity == TtsVerbosity.detailed) {
+      if (authProvider.isGuardian) {
+        english +=
+            ' Your guardian dashboard shows care reminders and connected patients.';
+        filipino +=
+            ' Nasa guardian dashboard ang mga paalala at konektadong pasyente.';
+      } else {
+        english +=
+            ' Open Schedule for all doses, or tap the microphone for help.';
+        filipino +=
+            ' Buksan ang Iskedyul para sa lahat ng gamot, o pindutin ang mikropono para sa tulong.';
+      }
+    }
     final tts = context.read<TtsProvider>();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) tts.speak(english, filipino);
@@ -260,8 +278,6 @@ class _DashboardScreenState extends State<DashboardScreen>
                           if (authProvider.isPatient &&
                               authProvider.isLoggedIn) ...[
                             const SizedBox(height: 16),
-                            const PatientGuardianHomeCard(),
-                            const SizedBox(height: 12),
                             CareReminderInbox(patientId: authProvider.userId),
                           ],
                           const SizedBox(height: 20),
@@ -276,6 +292,11 @@ class _DashboardScreenState extends State<DashboardScreen>
                                     next,
                                   ),
                           ),
+                          if (authProvider.isPatient &&
+                              authProvider.isLoggedIn) ...[
+                            const SizedBox(height: 12),
+                            const PatientGuardianHomeCard(),
+                          ],
                           const SizedBox(height: 14),
                           _BlisterStrip(
                             cells: cells,
@@ -381,8 +402,6 @@ class _DashboardScreenState extends State<DashboardScreen>
                           if (authProvider.isPatient &&
                               authProvider.isLoggedIn) ...[
                             const SizedBox(height: 16),
-                            const PatientGuardianHomeCard(large: true),
-                            const SizedBox(height: 12),
                             CareReminderInbox(
                               patientId: authProvider.userId,
                               large: true,
@@ -396,8 +415,16 @@ class _DashboardScreenState extends State<DashboardScreen>
                     SliverPadding(
                       padding: const EdgeInsets.fromLTRB(20, 28, 20, 160),
                       sliver: SliverToBoxAdapter(
-                        child: _ElderEmptyState(
-                          onScan: () => context.go('/scan'),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            _ElderEmptyState(onScan: () => context.go('/scan')),
+                            if (authProvider.isPatient &&
+                                authProvider.isLoggedIn) ...[
+                              const SizedBox(height: 16),
+                              const PatientGuardianHomeCard(large: true),
+                            ],
+                          ],
                         ),
                       ),
                     )
@@ -414,6 +441,13 @@ class _DashboardScreenState extends State<DashboardScreen>
                         ),
                       ),
                     ),
+                    if (authProvider.isPatient && authProvider.isLoggedIn)
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+                        sliver: const SliverToBoxAdapter(
+                          child: PatientGuardianHomeCard(large: true),
+                        ),
+                      ),
                     SliverPadding(
                       padding: const EdgeInsets.fromLTRB(20, 28, 20, 160),
                       sliver: SliverList(
@@ -1638,6 +1672,61 @@ class _BlockEmptyState extends StatelessWidget {
     final cardColor = isDark ? AppTheme.darkCardSurface : AppTheme.card;
     final iconColor = isDark ? AppTheme.darkTextPrimary : AppTheme.ink;
     final messageColor = isDark ? AppTheme.darkTextPrimary : AppTheme.inkText;
+    if (isElder) {
+      return Container(
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: cardColor,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: AppTheme.borderColor(context)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  color: isDark
+                      ? Colors.white.withValues(alpha: 0.08)
+                      : AppTheme.muted,
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(Icons.schedule_rounded, size: 38, color: iconColor),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Nothing due in the ${block.toLowerCase()}',
+              style: AppTheme.textStyle(
+                fontSize: 24,
+                height: 1.25,
+                fontWeight: FontWeight.w700,
+                color: messageColor,
+              ),
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 56,
+              child: OutlinedButton.icon(
+                onPressed: onShowAll,
+                icon: const Icon(Icons.list_alt_rounded),
+                label: Text(
+                  'Show all medicines',
+                  style: AppTheme.textStyle(
+                    fontWeight: FontWeight.w800,
+                    color: isDark ? AppTheme.darkAccentGreen : AppTheme.mint,
+                    fontSize: 19,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     return Container(
       padding: EdgeInsets.all(isElder ? 28 : 20),
       decoration: BoxDecoration(

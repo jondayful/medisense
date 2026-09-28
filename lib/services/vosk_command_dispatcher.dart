@@ -963,35 +963,8 @@ class VoskCommandDispatcher {
   }
 
   static ({int start, int end, int hour, int minute})? _timeIn(String text) {
-    final numeric = RegExp(
-      r'\b(\d{1,2})(?::(\d{2}))?\s*(a\s*m|p\s*m|am|pm)\b',
-    ).firstMatch(text);
-    if (numeric != null) {
-      var hour = int.parse(numeric.group(1)!);
-      final minute = int.tryParse(numeric.group(2) ?? '0') ?? 0;
-      if (hour < 1 || hour > 12 || minute > 59) return null;
-      final period = numeric.group(3)!.replaceAll(' ', '');
-      if (period == 'am' && hour == 12) hour = 0;
-      if (period == 'pm' && hour < 12) hour += 12;
-      return (
-        start: numeric.start,
-        end: numeric.end,
-        hour: hour,
-        minute: minute,
-      );
-    }
-    final twentyFourHour = RegExp(
-      r'\b([01]?\d|2[0-3]):([0-5]\d)\b',
-    ).firstMatch(text);
-    if (twentyFourHour != null) {
-      return (
-        start: twentyFourHour.start,
-        end: twentyFourHour.end,
-        hour: int.parse(twentyFourHour.group(1)!),
-        minute: int.parse(twentyFourHour.group(2)!),
-      );
-    }
-    // Spoken Filipino/English hours come from the one shared parser.
+    // Guided scanning and general voice commands share one clock parser so
+    // both preserve the exact minute that the user spoke.
     final spoken = ScanSpeechParser.timeIn(text);
     if (spoken == null) return null;
     return (

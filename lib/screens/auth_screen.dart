@@ -8,11 +8,13 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../theme/app_theme.dart';
 import '../providers/auth_provider.dart';
 import '../providers/app_state_provider.dart';
+import '../models/accessibility_mode.dart';
 import '../models/user.dart';
 import '../data/database_helper.dart';
 import '../services/supabase_sync_service.dart';
 import '../services/supabase_service.dart';
 import '../services/password_hasher.dart';
+import '../services/password_rules.dart';
 
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key, this.emailConfirmed = false, this.pairingId});
@@ -49,12 +51,12 @@ class _AuthScreenState extends State<AuthScreen> {
     _lastNameController.text.trim(),
   ].where((part) => part.isNotEmpty).join(' ');
 
-  bool _hasMinimumPasswordLength(String value) => value.length >= 8;
-  bool _hasUppercase(String value) => RegExp(r'[A-Z]').hasMatch(value);
-  bool _hasLowercase(String value) => RegExp(r'[a-z]').hasMatch(value);
-  bool _hasNumber(String value) => RegExp(r'[0-9]').hasMatch(value);
-  bool _hasSpecialCharacter(String value) =>
-      RegExp(r'[!@#$%^&*(),.?":{}|<>_\-]').hasMatch(value);
+  bool _hasMinimumPasswordLength(String value) =>
+      PasswordRules.hasLength(value);
+  bool _hasUppercase(String value) => PasswordRules.hasUppercase(value);
+  bool _hasLowercase(String value) => PasswordRules.hasLowercase(value);
+  bool _hasNumber(String value) => PasswordRules.hasNumber(value);
+  bool _hasSpecialCharacter(String value) => PasswordRules.hasSymbol(value);
 
   String? _validatePassword(String? value) {
     final password = value ?? '';
@@ -666,6 +668,10 @@ class _AuthScreenState extends State<AuthScreen> {
       context: context,
       barrierDismissible: false,
       builder: (dialogContext) {
+        final accessible = dialogContext
+            .read<AppStateProvider>()
+            .accessibilityMode
+            .usesLargeText;
         final dark = Theme.of(dialogContext).brightness == Brightness.dark;
         final textColor = dark ? AppTheme.darkTextPrimary : AppTheme.inkText;
         final mutedColor = dark
@@ -744,6 +750,7 @@ class _AuthScreenState extends State<AuthScreen> {
                     textColor: textColor,
                     mutedColor: mutedColor,
                     dark: dark,
+                    accessible: accessible,
                     onTap: () => Navigator.pop(dialogContext, UserRole.patient),
                   ),
                   const SizedBox(height: 12),
@@ -757,6 +764,7 @@ class _AuthScreenState extends State<AuthScreen> {
                       alpha: 0.84,
                     ),
                     dark: dark,
+                    accessible: accessible,
                     filled: true,
                     onTap: () =>
                         Navigator.pop(dialogContext, UserRole.guardian),
@@ -765,7 +773,11 @@ class _AuthScreenState extends State<AuthScreen> {
                   Text(
                     'Select the role that best describes you.',
                     textAlign: TextAlign.center,
-                    style: AppTheme.textStyle(fontSize: 13, color: mutedColor),
+                    style: AppTheme.textStyle(
+                      fontSize: accessible ? 17 : 13,
+                      height: 1.35,
+                      color: mutedColor,
+                    ),
                   ),
                 ],
               ),
@@ -778,7 +790,7 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 
   void _showForgotPassword() {
-    final emailCtrl = TextEditingController();
+    var email = '';
     showDialog(
       context: context,
       barrierColor: const Color.fromRGBO(44, 44, 36, 0.45),
@@ -804,7 +816,7 @@ class _AuthScreenState extends State<AuthScreen> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               TextField(
-                controller: emailCtrl,
+                onChanged: (value) => email = value,
                 autofocus: true,
                 style: AppTheme.textStyle(
                   fontSize: 18,
@@ -822,13 +834,13 @@ class _AuthScreenState extends State<AuthScreen> {
                 ),
                 keyboardType: TextInputType.emailAddress,
                 textInputAction: TextInputAction.done,
-                onSubmitted: (_) => _sendPasswordReset(ctx, emailCtrl.text),
+                onSubmitted: (_) => _sendPasswordReset(ctx, email),
               ),
               const SizedBox(height: 20),
               SizedBox(
                 height: 52,
                 child: ElevatedButton(
-                  onPressed: () => _sendPasswordReset(ctx, emailCtrl.text),
+                  onPressed: () => _sendPasswordReset(ctx, email),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: action,
                     foregroundColor: AppTheme.primaryForeground,
@@ -1089,6 +1101,10 @@ class _AuthScreenState extends State<AuthScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final accessible = context
+        .watch<AppStateProvider>()
+        .accessibilityMode
+        .usesLargeText;
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       appBar: AppBar(
@@ -1200,7 +1216,9 @@ class _AuthScreenState extends State<AuthScreen> {
                           Text(
                             _isLogin ? 'Welcome Back' : 'Create Account',
                             style: AppTheme.textStyle(
-                              fontSize: keyboardOpen ? 26 : 28,
+                              fontSize: accessible
+                                  ? (keyboardOpen ? 30 : 34)
+                                  : (keyboardOpen ? 26 : 28),
                               fontWeight: FontWeight.w800,
                               color: _primaryText,
                               letterSpacing: -1,
@@ -1209,10 +1227,12 @@ class _AuthScreenState extends State<AuthScreen> {
                           SizedBox(height: keyboardOpen ? 4 : 8),
                           Text(
                             _isLogin
-                                ? 'Sign in to sync your medication data.'
-                                : 'Start your journey to better health today.',
+                                ? 'Sign in to access your medicine schedule.'
+                                : 'Create an account to save your medicines and reminders.',
                             style: AppTheme.textStyle(
-                              fontSize: keyboardOpen ? 15 : 16,
+                              fontSize: accessible
+                                  ? (keyboardOpen ? 18 : 20)
+                                  : (keyboardOpen ? 15 : 16),
                               color: _secondaryText,
                               fontWeight: FontWeight.w500,
                             ),
@@ -1222,10 +1242,10 @@ class _AuthScreenState extends State<AuthScreen> {
                           if (!_isLogin) ...[
                             _buildLabel('Choose your role'),
                             const SizedBox(height: 8),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: _RoleCard(
+                            if (accessible)
+                              Column(
+                                children: [
+                                  _RoleCard(
                                     icon: Icons.person_rounded,
                                     label: 'Patient',
                                     filipinoLabel: 'Pasyente',
@@ -1233,14 +1253,13 @@ class _AuthScreenState extends State<AuthScreen> {
                                         'Manage my medicines and reminders',
                                     isSelected:
                                         _selectedRole == UserRole.patient,
+                                    accessible: true,
                                     onTap: () => setState(
                                       () => _selectedRole = UserRole.patient,
                                     ),
                                   ),
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: _RoleCard(
+                                  const SizedBox(height: 12),
+                                  _RoleCard(
                                     icon: Icons.family_restroom_rounded,
                                     label: 'Guardian',
                                     filipinoLabel: 'Tagapag-alaga',
@@ -1248,13 +1267,49 @@ class _AuthScreenState extends State<AuthScreen> {
                                         'Help manage someone’s medicines',
                                     isSelected:
                                         _selectedRole == UserRole.guardian,
+                                    accessible: true,
                                     onTap: () => setState(
                                       () => _selectedRole = UserRole.guardian,
                                     ),
                                   ),
-                                ),
-                              ],
-                            ),
+                                ],
+                              )
+                            else
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: _RoleCard(
+                                      icon: Icons.person_rounded,
+                                      label: 'Patient',
+                                      filipinoLabel: 'Pasyente',
+                                      description:
+                                          'Manage my medicines and reminders',
+                                      isSelected:
+                                          _selectedRole == UserRole.patient,
+                                      accessible: false,
+                                      onTap: () => setState(
+                                        () => _selectedRole = UserRole.patient,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: _RoleCard(
+                                      icon: Icons.family_restroom_rounded,
+                                      label: 'Guardian',
+                                      filipinoLabel: 'Tagapag-alaga',
+                                      description:
+                                          'Help manage someone’s medicines',
+                                      isSelected:
+                                          _selectedRole == UserRole.guardian,
+                                      accessible: false,
+                                      onTap: () => setState(
+                                        () => _selectedRole = UserRole.guardian,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
                             const SizedBox(height: 24),
                             _buildLabel('First Name'),
                             TextFormField(
@@ -1294,7 +1349,7 @@ class _AuthScreenState extends State<AuthScreen> {
 
                           _buildLabel('Email Address'),
                           SizedBox(
-                            height: 56,
+                            height: accessible ? 64 : 56,
                             child: TextFormField(
                               controller: _emailController,
                               style: _inputTextStyle,
@@ -1321,7 +1376,9 @@ class _AuthScreenState extends State<AuthScreen> {
                             const SizedBox(height: 24),
                             _buildLabel('Password'),
                             ConstrainedBox(
-                              constraints: const BoxConstraints(minHeight: 56),
+                              constraints: BoxConstraints(
+                                minHeight: accessible ? 64 : 56,
+                              ),
                               child: TextFormField(
                                 controller: _passwordController,
                                 focusNode: _passwordFocusNode,
@@ -1360,7 +1417,9 @@ class _AuthScreenState extends State<AuthScreen> {
                             const SizedBox(height: 24),
                             _buildLabel('Confirm Password'),
                             ConstrainedBox(
-                              constraints: const BoxConstraints(minHeight: 56),
+                              constraints: BoxConstraints(
+                                minHeight: accessible ? 64 : 56,
+                              ),
                               child: TextFormField(
                                 controller: _confirmPasswordController,
                                 style: _inputTextStyle,
@@ -1428,19 +1487,15 @@ class _AuthScreenState extends State<AuthScreen> {
                             const SizedBox(height: 16),
                             SizedBox(
                               width: double.infinity,
-                              height: 52,
+                              height: accessible ? 60 : 52,
                               child: OutlinedButton.icon(
                                 onPressed: _signInWithGoogle,
                                 icon: const Icon(Icons.account_circle_outlined),
-                                label: const FittedBox(
-                                  fit: BoxFit.scaleDown,
-                                  child: Text(
-                                    'Continue with Google',
-                                    maxLines: 1,
-                                    style: TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.w700,
-                                    ),
+                                label: Text(
+                                  'Continue with Google',
+                                  style: TextStyle(
+                                    fontSize: accessible ? 18 : 16,
+                                    fontWeight: FontWeight.w700,
                                   ),
                                 ),
                                 style: OutlinedButton.styleFrom(
@@ -1468,7 +1523,7 @@ class _AuthScreenState extends State<AuthScreen> {
                                     'Forgot Password?',
                                     style: AppTheme.textStyle(
                                       color: _secondaryText,
-                                      fontSize: 16,
+                                      fontSize: accessible ? 18 : 16,
                                       fontWeight: FontWeight.w600,
                                     ),
                                   ),
@@ -1492,7 +1547,7 @@ class _AuthScreenState extends State<AuthScreen> {
                                       : "Already have an account? ",
                                   style: AppTheme.textStyle(
                                     color: _secondaryText,
-                                    fontSize: 15,
+                                    fontSize: accessible ? 18 : 15,
                                     fontWeight: FontWeight.w500,
                                   ),
                                   children: [
@@ -1523,13 +1578,19 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 
   Widget _buildLabel(String label) {
+    final accessible = context
+        .read<AppStateProvider>()
+        .accessibilityMode
+        .usesLargeText;
     final isSectionLabel = label == 'Choose your role';
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Text(
         label,
         style: AppTheme.textStyle(
-          fontSize: isSectionLabel ? 18 : 16,
+          fontSize: accessible
+              ? (isSectionLabel ? 20 : 18)
+              : (isSectionLabel ? 18 : 16),
           fontWeight: FontWeight.w700,
           color: _primaryText,
           letterSpacing: 0.5,
@@ -1539,6 +1600,10 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 
   Widget _buildPasswordRequirements() {
+    final accessible = context
+        .read<AppStateProvider>()
+        .accessibilityMode
+        .usesLargeText;
     final password = _passwordController.text;
     final dark = Theme.of(context).brightness == Brightness.dark;
     final rules = <MapEntry<String, bool>>[
@@ -1581,7 +1646,7 @@ class _AuthScreenState extends State<AuthScreen> {
               Text(
                 rule.key,
                 style: AppTheme.textStyle(
-                  fontSize: 13,
+                  fontSize: accessible ? 16 : 13,
                   fontWeight: met ? FontWeight.w700 : FontWeight.w600,
                   color: met ? _primaryAction : _secondaryText,
                 ),
@@ -1613,7 +1678,7 @@ class _AuthScreenState extends State<AuthScreen> {
             Text(
               'Password must include',
               style: AppTheme.textStyle(
-                fontSize: 14,
+                fontSize: accessible ? 17 : 14,
                 fontWeight: FontWeight.w700,
                 color: _primaryText,
               ),
@@ -1651,7 +1716,9 @@ class _AuthScreenState extends State<AuthScreen> {
       : AppTheme.mutedText;
 
   TextStyle get _inputTextStyle => AppTheme.textStyle(
-    fontSize: 16,
+    fontSize: context.read<AppStateProvider>().accessibilityMode.usesLargeText
+        ? 19
+        : 16,
     fontWeight: FontWeight.w700,
     color: _primaryText,
   );
@@ -1671,7 +1738,10 @@ class _AuthScreenState extends State<AuthScreen> {
       hintText: hint,
       hintStyle: TextStyle(
         color: _inputHint,
-        fontSize: 16,
+        fontSize:
+            context.read<AppStateProvider>().accessibilityMode.usesLargeText
+            ? 18
+            : 16,
         fontStyle: FontStyle.normal,
         fontWeight: FontWeight.w500,
       ),
@@ -1784,6 +1854,7 @@ class _GoogleRoleCard extends StatelessWidget {
     required this.textColor,
     required this.mutedColor,
     required this.dark,
+    required this.accessible,
     required this.onTap,
     this.filled = false,
   });
@@ -1795,6 +1866,7 @@ class _GoogleRoleCard extends StatelessWidget {
   final Color textColor;
   final Color mutedColor;
   final bool dark;
+  final bool accessible;
   final bool filled;
   final VoidCallback onTap;
 
@@ -1825,7 +1897,7 @@ class _GoogleRoleCard extends StatelessWidget {
           onTap: onTap,
           borderRadius: BorderRadius.circular(18),
           child: Padding(
-            padding: const EdgeInsets.all(16),
+            padding: EdgeInsets.all(accessible ? 20 : 16),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
@@ -1847,7 +1919,7 @@ class _GoogleRoleCard extends StatelessWidget {
                       Text(
                         title,
                         style: AppTheme.textStyle(
-                          fontSize: 20,
+                          fontSize: accessible ? 24 : 20,
                           fontWeight: FontWeight.w800,
                           color: textColor,
                         ),
@@ -1857,7 +1929,7 @@ class _GoogleRoleCard extends StatelessWidget {
                         description,
                         softWrap: true,
                         style: AppTheme.textStyle(
-                          fontSize: 14,
+                          fontSize: accessible ? 18 : 14,
                           height: 1.28,
                           color: mutedColor,
                         ),
@@ -1882,6 +1954,7 @@ class _RoleCard extends StatelessWidget {
   final String filipinoLabel;
   final String description;
   final bool isSelected;
+  final bool accessible;
   final VoidCallback onTap;
 
   const _RoleCard({
@@ -1890,6 +1963,7 @@ class _RoleCard extends StatelessWidget {
     required this.filipinoLabel,
     required this.description,
     required this.isSelected,
+    required this.accessible,
     required this.onTap,
   });
 
@@ -1914,8 +1988,13 @@ class _RoleCard extends StatelessWidget {
             children: [
               AnimatedContainer(
                 duration: const Duration(milliseconds: 180),
-                constraints: const BoxConstraints(minHeight: 178),
-                padding: const EdgeInsets.fromLTRB(12, 18, 12, 16),
+                constraints: BoxConstraints(minHeight: accessible ? 0 : 178),
+                padding: EdgeInsets.fromLTRB(
+                  16,
+                  accessible ? 22 : 18,
+                  16,
+                  accessible ? 20 : 16,
+                ),
                 decoration: BoxDecoration(
                   color: isSelected
                       ? activeFill
@@ -1936,8 +2015,8 @@ class _RoleCard extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Container(
-                      width: 54,
-                      height: 54,
+                      width: accessible ? 64 : 54,
+                      height: accessible ? 64 : 54,
                       decoration: BoxDecoration(
                         color: isSelected
                             ? selectedText.withValues(alpha: 0.13)
@@ -1947,14 +2026,14 @@ class _RoleCard extends StatelessWidget {
                       child: Icon(
                         icon,
                         color: isSelected ? selectedText : activeBorder,
-                        size: 30,
+                        size: accessible ? 34 : 30,
                       ),
                     ),
                     const SizedBox(height: 10),
                     Text(
                       label,
                       style: AppTheme.textStyle(
-                        fontSize: 17,
+                        fontSize: accessible ? 22 : 17,
                         fontWeight: FontWeight.w800,
                         color: isSelected ? selectedText : inactiveTitle,
                       ),
@@ -1963,7 +2042,7 @@ class _RoleCard extends StatelessWidget {
                     Text(
                       filipinoLabel,
                       style: AppTheme.textStyle(
-                        fontSize: 12,
+                        fontSize: accessible ? 17 : 12,
                         fontWeight: FontWeight.w600,
                         color: isSelected
                             ? selectedText.withValues(alpha: 0.88)
@@ -1975,14 +2054,14 @@ class _RoleCard extends StatelessWidget {
                       description,
                       textAlign: TextAlign.center,
                       style: AppTheme.textStyle(
-                        fontSize: 11,
+                        fontSize: accessible ? 16 : 11,
                         fontWeight: FontWeight.w600,
                         color: isSelected
                             ? selectedText.withValues(alpha: 0.88)
                             : cardMuted,
                         height: 1.35,
                       ),
-                      maxLines: 3,
+                      maxLines: accessible ? null : 3,
                     ),
                   ],
                 ),

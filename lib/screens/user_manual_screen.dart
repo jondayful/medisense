@@ -183,7 +183,7 @@ class _ManualIntro extends StatelessWidget {
                             : 'OFFLINE • BILINGUAL',
                         style: AppTheme.microLabel(
                           color: primary,
-                          fontSize: accessible ? 12 : 10,
+                          fontSize: accessible ? 16 : 10,
                         ),
                       ),
                     ],
@@ -568,7 +568,7 @@ class _QuickStep extends StatelessWidget {
                   number,
                   style: AppTheme.textStyle(
                     color: Colors.white,
-                    fontSize: accessible ? 15 : 13,
+                    fontSize: accessible ? 16 : 13,
                     fontWeight: FontWeight.w800,
                   ),
                 ),
@@ -589,7 +589,7 @@ class _QuickStep extends StatelessWidget {
             detail,
             style: AppTheme.textStyle(
               color: secondary,
-              fontSize: accessible ? 14 : 12,
+              fontSize: accessible ? 16 : 12,
               height: 1.35,
             ),
           ),
@@ -673,30 +673,16 @@ class _ManualChapterCard extends StatelessWidget {
               ],
             ),
           ),
-          title: title.contains(' ')
-              ? Text(
-                  title,
-                  maxLines: 2,
-                  style: AppTheme.textStyle(
-                    fontSize: accessible ? 20 : 17,
-                    fontWeight: FontWeight.w800,
-                    color: primary,
-                  ),
-                )
-              : FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    title,
-                    maxLines: 1,
-                    softWrap: false,
-                    style: AppTheme.textStyle(
-                      fontSize: accessible ? 20 : 17,
-                      fontWeight: FontWeight.w800,
-                      color: primary,
-                    ),
-                  ),
-                ),
+          title: Text(
+            title,
+            maxLines: accessible ? null : 2,
+            softWrap: true,
+            style: AppTheme.textStyle(
+              fontSize: accessible ? 20 : 17,
+              fontWeight: FontWeight.w800,
+              color: primary,
+            ),
+          ),
           subtitle: Padding(
             padding: const EdgeInsets.only(top: 5),
             child: Column(
@@ -716,7 +702,11 @@ class _ManualChapterCard extends StatelessWidget {
                   runSpacing: 6,
                   children: [
                     for (final cue in cues)
-                      _GuideCue(label: cue, color: accent),
+                      _GuideCue(
+                        label: cue,
+                        color: accent,
+                        accessible: accessible,
+                      ),
                   ],
                 ),
               ],
@@ -788,10 +778,15 @@ class _ManualChapterCard extends StatelessWidget {
 }
 
 class _GuideCue extends StatelessWidget {
-  const _GuideCue({required this.label, required this.color});
+  const _GuideCue({
+    required this.label,
+    required this.color,
+    required this.accessible,
+  });
 
   final String label;
   final Color color;
+  final bool accessible;
 
   @override
   Widget build(BuildContext context) {
@@ -805,8 +800,8 @@ class _GuideCue extends StatelessWidget {
         label,
         style: AppTheme.microLabel(
           color: color,
-          fontSize: 9,
-          letterSpacing: 0.7,
+          fontSize: accessible ? 16 : 12,
+          letterSpacing: accessible ? 0.5 : 0.7,
         ),
       ),
     );

@@ -10,6 +10,7 @@ import '../models/voice_levels.dart';
 import '../services/accessibility_feedback.dart';
 import '../services/medication_catalog_store.dart';
 import '../services/medicine_speech_formatter.dart';
+import '../services/medicine_expiry_parser.dart';
 import '../services/scan_speech_parser.dart';
 import '../services/vosk_command_dispatcher.dart';
 import '../services/vosk_command_listener.dart';
@@ -122,6 +123,7 @@ class VoiceNavigationProvider extends ChangeNotifier
   final VoskCommandDispatcher _dispatcher = const VoskCommandDispatcher();
   VoskCommandListener? _listener;
   GoRouter? _router;
+  bool _suppressNextScheduleGreeting = false;
   TtsProvider? _tts;
   MedicationProvider? _medications;
   AppStateProvider? _appState;
@@ -445,6 +447,8 @@ class VoiceNavigationProvider extends ChangeNotifier
       'midisens',
       'midisins',
       'medisins',
+      'medesense',
+      'medesens',
     };
     for (var start = 0; start < words.length; start++) {
       final greetedBeforePhrase = words.take(start).any(greetings.contains);
@@ -857,6 +861,11 @@ class VoiceNavigationProvider extends ChangeNotifier
     if (_disposed || !_pushToTalkMode || !_isForeground) return;
     command = _preferKnownMedicationName(command);
     if (command.route.isNotEmpty) {
+      if (command.route == '/schedule' &&
+          _router?.routerDelegate.currentConfiguration.uri.path !=
+              '/schedule') {
+        _suppressNextScheduleGreeting = true;
+      }
       _router?.go(command.route);
       AccessibilityFeedback.pageChanged();
     }
@@ -917,6 +926,15 @@ class VoiceNavigationProvider extends ChangeNotifier
       case VoskVoiceIntent.readScreen:
         readCurrentScreen();
     }
+  }
+
+  /// The voice command already speaks the schedule readout. Suppress the
+  /// schedule screen's arrival greeting for that one route transition so it
+  /// cannot replace the answer while it is being spoken.
+  bool consumeScheduleGreetingSuppression() {
+    final suppress = _suppressNextScheduleGreeting;
+    _suppressNextScheduleGreeting = false;
+    return suppress;
   }
 
   Future<void> _prepareMarkTaken(VoskCommand command) async {
@@ -1615,6 +1633,9 @@ class VoiceNavigationProvider extends ChangeNotifier
 
   String _scheduleReadout({bool filipino = false, String? period}) {
     final meds = _medications?.medications ?? <Medication>[];
+    final now = DateTime.now();
+    final currentBlock = ScheduleTime.labelFor(now.hour);
+    final currentIndex = ScheduleTime.blocks.indexOf(currentBlock);
     final spokenExpiryFor = <String>{};
     final doses =
         [
@@ -1623,6 +1644,17 @@ class VoiceNavigationProvider extends ChangeNotifier
               if (period == null || time.label == period)
                 (med: med, time: time),
         ]..sort((a, b) {
+          if (period == null) {
+            final aIndex = ScheduleTime.blocks.indexOf(a.time.label);
+            final bIndex = ScheduleTime.blocks.indexOf(b.time.label);
+            final aOrder =
+                (aIndex - currentIndex + ScheduleTime.blocks.length) %
+                ScheduleTime.blocks.length;
+            final bOrder =
+                (bIndex - currentIndex + ScheduleTime.blocks.length) %
+                ScheduleTime.blocks.length;
+            if (aOrder != bOrder) return aOrder.compareTo(bOrder);
+          }
           final aMinutes = a.time.time.hour * 60 + a.time.time.minute;
           final bMinutes = b.time.time.hour * 60 + b.time.time.minute;
           return aMinutes.compareTo(bMinutes);
@@ -1643,17 +1675,19 @@ class VoiceNavigationProvider extends ChangeNotifier
           ? '$medicine, sa ${time.formattedTime}${expiry == null ? '' : ', $expiry'}'
           : '$medicine at ${time.formattedTime}${expiry == null ? '' : ', $expiry'}';
     }).toList();
-    return items.isEmpty
+    final intro = period == null
         ? filipino
-              ? period == null
-                    ? 'Wala pang nakatakdang gamot.'
-                    : 'Wala kang nakatakdang gamot para sa ${_filipinoPeriod(period)}.'
-              : period == null
-              ? 'Your medication schedule is empty.'
-              : 'You have no medicines scheduled for ${period.toLowerCase()}.'
+              ? 'Ito ang gamot mo sa ${ScheduleTime.filipinoPeriodFor(now.hour)}.'
+              : 'Here are your medicines for ${currentBlock.toLowerCase()}.'
         : filipino
-        ? '${period == null ? 'Ang iskedyul ng iyong gamot' : 'Ang mga gamot mo para sa ${_filipinoPeriod(period)}'}: ${items.join(', ')}.'
-        : '${period == null ? 'Your medication schedule' : 'Your ${period.toLowerCase()} medicines'}: ${items.join(', ')}.';
+        ? 'Ito ang gamot mo sa ${_filipinoPeriod(period)}.'
+        : 'Here are your ${period.toLowerCase()} medicines.';
+    if (items.isEmpty) {
+      return filipino
+          ? '$intro Wala kang nakatakdang gamot.'
+          : '$intro No medicines are scheduled.';
+    }
+    return '$intro ${items.join(', ')}.';
   }
 
   String? _expiryReadout(Medication medication, {required bool filipino}) {
@@ -1661,7 +1695,7 @@ class VoiceNavigationProvider extends ChangeNotifier
     final expirationDate = medication.expirationDate;
     final daysUntilExpiry = medication.daysUntilExpiry;
     if (expirationDate == null || daysUntilExpiry == null) return null;
-    final date = DateFormat('MMMM d, y').format(expirationDate);
+    final date = MedicineExpiryParser.formatStored(expirationDate);
     if (medication.isExpired) {
       return filipino
           ? 'expired na noong $date, huwag inumin'

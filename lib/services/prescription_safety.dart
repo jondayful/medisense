@@ -142,6 +142,25 @@ class PrescriptionScanCheck {
 /// Local-only comparison. It intentionally never identifies an unknown scan as
 /// a substitute medicine and never recommends taking a mismatched strength.
 class PrescriptionSafety {
+  /// Finds an existing entry with the same medicine and printed strength.
+  /// This is also used when a scan reaches the edit form after OCR review.
+  static Medication? findMatchingMedication({
+    required String scannedName,
+    required String scannedStrength,
+    required List<Medication> activeMedications,
+  }) {
+    final name = _normalise(scannedName);
+    final strength = _normaliseStrength(scannedStrength);
+    if (name.isEmpty || strength.isEmpty) return null;
+    for (final medication in activeMedications) {
+      if (_normalise(medication.name) == name &&
+          _normaliseStrength(medication.dosage) == strength) {
+        return medication;
+      }
+    }
+    return null;
+  }
+
   static PrescriptionScanCheck check({
     required String scannedName,
     required String scannedStrength,
@@ -163,13 +182,19 @@ class PrescriptionSafety {
         sameName.first,
       );
     }
-    final strength = _normalise(scannedStrength);
+    final strength = _normaliseStrength(scannedStrength);
     final exact = sameName
-        .where((m) => _normalise(m.dosage) == strength)
+        .where((m) => _normaliseStrength(m.dosage) == strength)
         .toList();
     if (exact.length == 1) {
       return PrescriptionScanCheck(
         PrescriptionScanVerdict.matchesPlan,
+        exact.first,
+      );
+    }
+    if (exact.length > 1) {
+      return PrescriptionScanCheck(
+        PrescriptionScanVerdict.unclear,
         exact.first,
       );
     }
@@ -184,4 +209,11 @@ class PrescriptionSafety {
       .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
       .replaceAll(RegExp(r'\s+'), ' ')
       .trim();
+
+  static String _normaliseStrength(String value) => _normalise(
+    value.replaceAllMapped(
+      RegExp(r'(\d)\s+(mg|mcg|g|ml|iu|units?)\b', caseSensitive: false),
+      (match) => '${match.group(1)}${match.group(2)}',
+    ),
+  );
 }

@@ -3,6 +3,8 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import '../theme/app_theme.dart';
 import '../providers/auth_provider.dart';
+import '../providers/app_state_provider.dart';
+import '../models/accessibility_mode.dart';
 
 class AppDrawer extends StatelessWidget {
   final String currentRoute;
@@ -12,6 +14,10 @@ class AppDrawer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final authProvider = context.watch<AuthProvider>();
+    final accessible = context
+        .watch<AppStateProvider>()
+        .accessibilityMode
+        .usesLargeText;
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final brand = isDark ? AppTheme.darkAccentGreen : AppTheme.primaryDark;
     final brandOn = isDark ? AppTheme.darkPrimaryForeground : Colors.white;
@@ -30,7 +36,12 @@ class AppDrawer extends StatelessWidget {
         child: Column(
           children: [
             Container(
-              padding: const EdgeInsets.fromLTRB(24, 32, 24, 32),
+              padding: EdgeInsets.fromLTRB(
+                24,
+                accessible ? 28 : 32,
+                24,
+                accessible ? 24 : 32,
+              ),
               child: Row(
                 children: [
                   Container(
@@ -53,7 +64,7 @@ class AppDrawer extends StatelessWidget {
                         'MediSense',
                         style: AppTheme.textStyle(
                           color: brand,
-                          fontSize: 20,
+                          fontSize: accessible ? 24 : 20,
                           fontWeight: FontWeight.w800,
                         ),
                       ),
@@ -61,7 +72,7 @@ class AppDrawer extends StatelessWidget {
                         'Version 1.0.0',
                         style: AppTheme.textStyle(
                           color: secondaryText,
-                          fontSize: 13,
+                          fontSize: accessible ? 16 : 13,
                           fontWeight: FontWeight.w600,
                         ),
                       ),
@@ -108,7 +119,7 @@ class AppDrawer extends StatelessWidget {
                       'SYSTEM',
                       style: AppTheme.textStyle(
                         color: secondaryText,
-                        fontSize: 12,
+                        fontSize: accessible ? 16 : 12,
                         fontWeight: FontWeight.w800,
                         letterSpacing: 1.5,
                       ),
@@ -162,7 +173,7 @@ class AppDrawer extends StatelessWidget {
                                   : 'Guest User',
                               style: AppTheme.textStyle(
                                 fontWeight: FontWeight.w700,
-                                fontSize: 15,
+                                fontSize: accessible ? 20 : 15,
                                 color: primaryText,
                               ),
                               maxLines: 2,
@@ -175,7 +186,7 @@ class AppDrawer extends StatelessWidget {
                                         : authProvider.tier
                                   : 'Login / Sign Up',
                               style: AppTheme.textStyle(
-                                fontSize: 12,
+                                fontSize: accessible ? 16 : 12,
                                 color: secondaryText,
                                 fontWeight: FontWeight.w600,
                               ),
@@ -216,6 +227,10 @@ class _DrawerItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final accessible = context
+        .watch<AppStateProvider>()
+        .accessibilityMode
+        .usesLargeText;
     final isActive = currentRoute == route;
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final active = AppTheme.actionColor(context);
@@ -237,22 +252,25 @@ class _DrawerItem extends StatelessWidget {
         },
         borderRadius: BorderRadius.circular(16),
         child: Container(
-          constraints: const BoxConstraints(minHeight: 48),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          constraints: BoxConstraints(minHeight: accessible ? 60 : 48),
+          padding: EdgeInsets.symmetric(
+            horizontal: 16,
+            vertical: accessible ? 16 : 12,
+          ),
           decoration: BoxDecoration(
             color: isActive ? active : Colors.transparent,
             borderRadius: BorderRadius.circular(16),
           ),
           child: Row(
             children: [
-              Icon(icon, color: iconColor, size: 22),
+              Icon(icon, color: iconColor, size: accessible ? 26 : 22),
               const SizedBox(width: 16),
               Text(
                 label,
                 style: AppTheme.textStyle(
                   color: textColor,
                   fontWeight: isActive ? FontWeight.bold : FontWeight.w600,
-                  fontSize: 15,
+                  fontSize: accessible ? 20 : 15,
                 ),
               ),
             ],

@@ -10,7 +10,9 @@ import '../providers/auth_provider.dart';
 import '../services/subscription_service.dart';
 import '../services/supabase_service.dart';
 import '../services/supabase_sync_service.dart';
+import '../services/password_rules.dart';
 import '../theme/app_theme.dart';
+import '../widgets/notification_settings_sheet.dart';
 
 bool _usesLargeText(BuildContext context) =>
     context.select<AppStateProvider, bool>(
@@ -76,53 +78,17 @@ class ProfileScreen extends StatelessWidget {
         ),
         children: [
           Center(
-            child: Stack(
-              clipBehavior: Clip.none,
-              children: [
-                CircleAvatar(
-                  radius: isLarge ? 62 : 54,
-                  backgroundColor: accent.withValues(alpha: .14),
-                  child: Text(
-                    initials.isEmpty ? 'M' : initials,
-                    style: AppTheme.textStyle(
-                      fontSize: isLarge ? 40 : 34,
-                      fontWeight: FontWeight.w800,
-                      color: accent,
-                    ),
-                  ),
+            child: CircleAvatar(
+              radius: isLarge ? 62 : 54,
+              backgroundColor: accent.withValues(alpha: .14),
+              child: Text(
+                initials.isEmpty ? 'M' : initials,
+                style: AppTheme.textStyle(
+                  fontSize: isLarge ? 40 : 34,
+                  fontWeight: FontWeight.w800,
+                  color: accent,
                 ),
-                Positioned(
-                  right: -4,
-                  bottom: -4,
-                  child: Semantics(
-                    button: true,
-                    label: 'Change profile photo',
-                    child: Material(
-                      color: accent,
-                      shape: const CircleBorder(),
-                      child: InkWell(
-                        customBorder: const CircleBorder(),
-                        onTap: () => ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                              'Profile photo upload will be available soon.',
-                            ),
-                          ),
-                        ),
-                        child: const SizedBox(
-                          width: 48,
-                          height: 48,
-                          child: Icon(
-                            Icons.camera_alt_rounded,
-                            size: 21,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+              ),
             ),
           ),
           SizedBox(height: isLarge ? 20 : 16),
@@ -217,7 +183,12 @@ class ProfileScreen extends StatelessWidget {
                   title: 'Notification Settings',
                   detail: 'Reminders and alerts',
                   isLarge: isLarge,
-                  onTap: () => context.go('/settings'),
+                  onTap: () => showModalBottomSheet<void>(
+                    context: context,
+                    isScrollControlled: true,
+                    showDragHandle: true,
+                    builder: (_) => const NotificationSettingsSheet(),
+                  ),
                 ),
               ],
             ),
@@ -585,8 +556,8 @@ class _EmailSheetState extends State<_EmailSheet> {
               ),
             ),
             const SizedBox(height: 22),
-            TextField(
-              controller: TextEditingController(text: widget.email),
+            TextFormField(
+              initialValue: widget.email,
               readOnly: true,
               decoration: _input(
                 context,
@@ -638,12 +609,16 @@ class _PasswordSheetState extends State<_PasswordSheet> {
       next = TextEditingController(),
       confirm = TextEditingController();
   bool a = false, b = false, c = false, saving = false;
-  bool get length => next.text.length >= 8;
-  bool get number => RegExp(r'\d').hasMatch(next.text);
-  bool get special => RegExp(r'[^A-Za-z0-9]').hasMatch(next.text);
+  bool get length => PasswordRules.hasLength(next.text);
+  bool get number => PasswordRules.hasNumber(next.text);
+  bool get uppercase => PasswordRules.hasUppercase(next.text);
+  bool get lowercase => PasswordRules.hasLowercase(next.text);
+  bool get special => PasswordRules.hasSymbol(next.text);
   bool get valid =>
       current.text.isNotEmpty &&
       length &&
+      uppercase &&
+      lowercase &&
       number &&
       special &&
       next.text == confirm.text;
@@ -659,23 +634,44 @@ class _PasswordSheetState extends State<_PasswordSheet> {
     if (!valid) return;
     setState(() => saving = true);
     final auth = context.read<AuthProvider>();
-    final user = await DatabaseHelper().getUser(auth.userEmail);
-    final ok = DatabaseHelper().verifyPassword(
-      current.text,
-      user?['password'] as String? ?? '',
-    );
-    if (!mounted) return;
-    if (!ok) {
+    try {
+      final user = await DatabaseHelper().getUser(auth.userEmail);
+      final cloudUser = SupabaseService.isConfigured
+          ? SupabaseService.client.auth.currentUser
+          : null;
+      if (cloudUser != null) {
+        await SupabaseService.client.auth.signInWithPassword(
+          email: auth.userEmail,
+          password: current.text,
+        );
+        await SupabaseService.client.auth.updateUser(
+          UserAttributes(password: next.text),
+        );
+      } else {
+        final ok = DatabaseHelper().verifyPassword(
+          current.text,
+          user?['password'] as String? ?? '',
+        );
+        if (!ok) throw const AuthException('Incorrect current password');
+      }
+      if (user != null) {
+        await DatabaseHelper().updateUserPassword(auth.userEmail, next.text);
+      }
+    } catch (error) {
+      if (!mounted) return;
       setState(() => saving = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Your current password is incorrect'),
+        SnackBar(
+          content: Text(
+            error is AuthException
+                ? error.message
+                : 'Could not update your password. Please try again.',
+          ),
           backgroundColor: AppTheme.error,
         ),
       );
       return;
     }
-    await DatabaseHelper().updateUserPassword(auth.userEmail, next.text);
     if (!mounted) return;
     Navigator.pop(context);
     ScaffoldMessenger.of(context).showSnackBar(
@@ -755,6 +751,8 @@ class _PasswordSheetState extends State<_PasswordSheet> {
                 runSpacing: 8,
                 children: [
                   _Rule('8+ characters', length),
+                  _Rule('Uppercase letter', uppercase),
+                  _Rule('Lowercase letter', lowercase),
                   _Rule('1 number', number),
                   _Rule('1 special character', special),
                 ],

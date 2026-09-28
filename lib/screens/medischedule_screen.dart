@@ -1,6 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
-import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:go_router/go_router.dart';
 import '../theme/app_theme.dart';
@@ -20,6 +21,7 @@ import '../widgets/medicine_bottle_illustration.dart';
 import '../services/accessibility_feedback.dart';
 import '../services/medication_semantics.dart';
 import '../services/greeting_name.dart';
+import '../services/medicine_expiry_parser.dart';
 
 typedef _BlockInfo = ({IconData icon, String label, List<ScheduledDose> doses});
 
@@ -31,8 +33,49 @@ class MediScheduleScreen extends StatefulWidget {
 }
 
 class _MediScheduleScreenState extends State<MediScheduleScreen>
-    with AutomaticKeepAliveClientMixin {
+    with AutomaticKeepAliveClientMixin, WidgetsBindingObserver {
   bool _hasGreeted = false;
+  Timer? _timeRefresh;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _scheduleNextTimeRefresh();
+  }
+
+  void _scheduleNextTimeRefresh() {
+    _timeRefresh?.cancel();
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final next = [0, 5, 12, 17, 21]
+        .map((hour) => today.add(Duration(hours: hour)))
+        .followedBy([today.add(const Duration(days: 1))])
+        .firstWhere((boundary) => boundary.isAfter(now));
+    _timeRefresh = Timer(next.difference(now), () {
+      if (!mounted) return;
+      setState(() {});
+      _scheduleNextTimeRefresh();
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) {
+      setState(() {});
+      _scheduleNextTimeRefresh();
+    } else if (state != AppLifecycleState.resumed) {
+      _timeRefresh?.cancel();
+      _timeRefresh = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _timeRefresh?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
 
   /// Toggles a dose's taken state with the duplicate-dose guard when marking
   /// taken shortly after it was already marked.
@@ -110,8 +153,10 @@ class _MediScheduleScreenState extends State<MediScheduleScreen>
         'Kung kinakailangan: ${prnMedications.map((medication) => medication.name).join(', ')}',
       );
     }
-    if (parts.isEmpty) return 'Wala pang nakatakdang gamot.';
-    return 'Ang iyong iskedyul ng mga gamot. ${parts.join('. ')}';
+    final period = ScheduleTime.filipinoPeriodFor(DateTime.now().hour);
+    final introduction = 'Ito ang gamot mo sa $period.';
+    if (parts.isEmpty) return '$introduction Wala pang nakatakdang gamot.';
+    return '$introduction ${parts.join('. ')}';
   }
 
   @override
@@ -121,10 +166,15 @@ class _MediScheduleScreenState extends State<MediScheduleScreen>
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (!_hasGreeted) {
+      if (context
+          .read<VoiceNavigationProvider>()
+          .consumeScheduleGreetingSuppression()) {
+        _hasGreeted = true;
+        return;
+      }
       final appState = context.read<AppStateProvider>();
       final tts = context.read<TtsProvider>();
-      if (appState.accessibilityMode.isVisionLoss &&
-          appState.ttsVerbosity != TtsVerbosity.essential) {
+      if (appState.ttsVerbosity != TtsVerbosity.essential) {
         final auth = context.watch<AuthProvider>();
         if (appState.savedUserId != null && !auth.isLoggedIn) return;
         final name = resolveGreetingName([
@@ -132,16 +182,15 @@ class _MediScheduleScreenState extends State<MediScheduleScreen>
           appState.savedUserName,
           appState.onboardingName,
         ]);
-        if (appState.ttsVerbosity == TtsVerbosity.detailed) {
+        if (appState.ttsVerbosity == TtsVerbosity.detailed &&
+            appState.accessibilityMode.isVisionLoss) {
           context.read<VoiceNavigationProvider>().readCurrentScreen();
         } else {
+          final period = _currentBlock.toLowerCase();
+          final periodFil = ScheduleTime.filipinoPeriodFor(DateTime.now().hour);
           tts.speak(
-            name == null
-                ? 'Here is your medication schedule.'
-                : 'Hello $name, here is your medication schedule.',
-            name == null
-                ? 'Narito ang iskedyul ng iyong mga gamot.'
-                : 'Kumusta, $name. Narito ang iskedyul ng iyong mga gamot.',
+            '${name == null ? '' : 'Hello $name. '}Here are your medicines for $period.',
+            '${name == null ? '' : 'Kumusta, $name. '}Ito ang gamot mo sa $periodFil.',
           );
         }
       }
@@ -178,6 +227,13 @@ class _MediScheduleScreenState extends State<MediScheduleScreen>
         doses: scheduledDosesForBlock(provider.medications, 'Night'),
       ),
     ];
+    final currentIndex = ScheduleTime.blocks.indexOf(_currentBlock);
+    blocks.sort((a, b) {
+      final aIndex = ScheduleTime.blocks.indexOf(a.label);
+      final bIndex = ScheduleTime.blocks.indexOf(b.label);
+      return ((aIndex - currentIndex + blocks.length) % blocks.length)
+          .compareTo((bIndex - currentIndex + blocks.length) % blocks.length);
+    });
 
     final prnMedications = provider.medications
         .where((medication) => medication.frequency == 'As needed')
@@ -214,52 +270,9 @@ class _MediScheduleScreenState extends State<MediScheduleScreen>
                 : ListView(
                     padding: EdgeInsets.only(top: 16, bottom: 110),
                     children: [
-                      if (prnMedications.isNotEmpty) ...[
-                        Padding(
-                          padding: EdgeInsets.symmetric(
-                            horizontal: isElder ? 16 : 0,
-                          ),
-                          child: _TimeBlockHeader(
-                            icon: Icons.medication_outlined,
-                            label: 'As needed',
-                            count: prnMedications.length,
-                            isNow: false,
-                            isElder: isElder,
-                          ),
-                        ),
-                        for (final medication in prnMedications)
-                          Card(
-                            margin: EdgeInsets.fromLTRB(
-                              isElder ? 16 : 0,
-                              4,
-                              isElder ? 16 : 0,
-                              8,
-                            ),
-                            child: ListTile(
-                              minVerticalPadding: isElder ? 16 : 12,
-                              leading: const Icon(Icons.medication_outlined),
-                              title: Text(
-                                medication.name,
-                                style: TextStyle(
-                                  fontSize: isElder ? 20 : 16,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              subtitle: Text(
-                                [medication.dosage, medication.form]
-                                    .where((part) => part.trim().isNotEmpty)
-                                    .join(' · '),
-                                style: TextStyle(fontSize: isElder ? 16 : 14),
-                              ),
-                              trailing: const Icon(Icons.chevron_right_rounded),
-                              onTap: () =>
-                                  context.go('/medication/${medication.id}'),
-                            ),
-                          ),
-                        const SizedBox(height: 16),
-                      ],
                       for (final block in blocks)
-                        if (block.doses.isNotEmpty) ...[
+                        if (block.doses.isNotEmpty ||
+                            block.label == _currentBlock) ...[
                           Padding(
                             padding: EdgeInsets.fromLTRB(
                               isElder ? 16 : 0,
@@ -301,6 +314,18 @@ class _MediScheduleScreenState extends State<MediScheduleScreen>
                                     isNow: block.label == _currentBlock,
                                     isElder: isElder,
                                   ),
+                                  if (block.doses.isEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.fromLTRB(
+                                        16,
+                                        8,
+                                        16,
+                                        16,
+                                      ),
+                                      child: Text(
+                                        'No medicines scheduled for ${block.label.toLowerCase()}.',
+                                      ),
+                                    ),
                                   ...block.doses.map(
                                     (dose) => _ScheduleTile(
                                       medication: dose.medication,
@@ -325,6 +350,42 @@ class _MediScheduleScreenState extends State<MediScheduleScreen>
                             ),
                           ),
                         ],
+                      if (prnMedications.isNotEmpty) ...[
+                        Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: isElder ? 16 : 0,
+                          ),
+                          child: _TimeBlockHeader(
+                            icon: Icons.medication_outlined,
+                            label: 'As needed',
+                            count: prnMedications.length,
+                            isNow: false,
+                            isElder: isElder,
+                          ),
+                        ),
+                        for (final medication in prnMedications)
+                          Card(
+                            margin: EdgeInsets.fromLTRB(
+                              isElder ? 16 : 0,
+                              4,
+                              isElder ? 16 : 0,
+                              8,
+                            ),
+                            child: ListTile(
+                              minVerticalPadding: isElder ? 16 : 12,
+                              leading: const Icon(Icons.medication_outlined),
+                              title: Text(medication.name),
+                              subtitle: Text(
+                                [medication.dosage, medication.form]
+                                    .where((part) => part.trim().isNotEmpty)
+                                    .join(' · '),
+                              ),
+                              trailing: const Icon(Icons.chevron_right_rounded),
+                              onTap: () =>
+                                  context.go('/medication/${medication.id}'),
+                            ),
+                          ),
+                      ],
                     ],
                   ),
           ),
@@ -642,7 +703,7 @@ class _TimeBlockHeader extends StatelessWidget {
                     const SizedBox(width: 6),
                   ],
                   Text(
-                    isDark ? 'Current' : (isElder ? 'Now' : 'NOW'),
+                    'Now',
                     style: isElder
                         ? AppTheme.textStyle(
                             fontSize: 16,
@@ -1073,7 +1134,7 @@ class _ExpiryNotice extends StatelessWidget {
         : expiring
         ? const Color(0xFFB26A00)
         : muted;
-    final date = DateFormat('MMM d, y').format(expirationDate);
+    final date = MedicineExpiryParser.formatStored(expirationDate);
     final label = expired
         ? 'Expired on $date'
         : expiring

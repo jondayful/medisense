@@ -1,4 +1,5 @@
 import '../models/medication.dart';
+import 'medicine_expiry_parser.dart';
 
 String medicationSemanticsLabel(
   Medication medication, {
@@ -34,4 +35,4 @@ String medicationSemanticsLabel(
   return '${medication.name}, $doseWord, $doses, $expiryStatus.';
 }
 
-String _formatDate(DateTime date) => '${date.month}/${date.day}/${date.year}';
+String _formatDate(DateTime date) => MedicineExpiryParser.formatStored(date);

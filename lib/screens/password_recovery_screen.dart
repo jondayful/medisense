@@ -8,6 +8,7 @@ import '../models/accessibility_mode.dart';
 import '../providers/app_state_provider.dart';
 import '../providers/auth_provider.dart';
 import '../services/supabase_service.dart';
+import '../services/password_rules.dart';
 import '../theme/app_theme.dart';
 
 class PasswordRecoveryScreen extends StatefulWidget {
@@ -32,8 +33,7 @@ class _PasswordRecoveryScreenState extends State<PasswordRecoveryScreen> {
   bool _complete = false;
   String? _error;
 
-  bool _hasSpecialCharacter(String value) =>
-      RegExp(r'[!@#$%^&*(),.?":{}|<>_\-]').hasMatch(value);
+  bool _hasSpecialCharacter(String value) => PasswordRules.hasSymbol(value);
 
   @override
   void initState() {
