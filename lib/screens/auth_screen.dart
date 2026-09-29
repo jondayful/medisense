@@ -507,7 +507,7 @@ class _AuthScreenState extends State<AuthScreen> {
       if (!GoogleSignIn.instance.supportsAuthenticate()) {
         throw StateError(
           'Google Sign-In is unavailable in this platform build. '
-          'Fully stop and rebuild the Android app.',
+          'Fully stop and rebuild the app after configuring this platform.',
         );
       }
 

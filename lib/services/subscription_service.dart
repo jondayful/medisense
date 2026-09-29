@@ -1,5 +1,6 @@
 import 'package:url_launcher/url_launcher.dart';
 
+import 'cloud_vision_service.dart';
 import 'supabase_service.dart';
 
 class SubscriptionPlan {
@@ -22,18 +23,24 @@ class SubscriptionService {
     title: 'Premium monthly',
     price: '₱99 / month',
     description:
-        'Unlimited cloud scans, better OCR, priority alerts, and voice profiles.',
+        'Removes the app\'s daily limit on optional cloud OCR fallback for 31 days.',
   );
 
   static const guardianAnnual = SubscriptionPlan(
     id: 'guardian_annual',
-    title: 'Guardian annual',
+    title: 'Annual cloud OCR',
     price: '₱599 / year',
     description:
-        'Guardian dashboard, advanced analytics, and multi-patient support.',
+        'Removes the app\'s daily limit on optional cloud OCR fallback for 365 days.',
   );
 
   Future<bool> openCheckout(SubscriptionPlan plan) async {
+    if (!SupabaseService.isConfigured) {
+      throw StateError('Account services are unavailable in this app build.');
+    }
+    if (!CloudVisionService.isConfiguredForThisBuild) {
+      throw StateError('Cloud OCR is unavailable in this app build.');
+    }
     final result = await SupabaseService.client.functions.invoke(
       'create-paymongo-checkout',
       body: {'planId': plan.id},

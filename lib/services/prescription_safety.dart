@@ -128,6 +128,8 @@ class PrescriptionInstructionParser {
 enum PrescriptionScanVerdict {
   matchesPlan,
   strengthMismatch,
+  outsideScheduledTime,
+  alreadyRecorded,
   notInPlan,
   unclear,
 }
@@ -165,6 +167,7 @@ class PrescriptionSafety {
     required String scannedName,
     required String scannedStrength,
     required List<Medication> activeMedications,
+    DateTime? at,
   }) {
     final name = _normalise(scannedName);
     if (name.isEmpty) {
@@ -187,6 +190,42 @@ class PrescriptionSafety {
         .where((m) => _normaliseStrength(m.dosage) == strength)
         .toList();
     if (exact.length == 1) {
+      if (at != null) {
+        // This is an app reminder window, not permission to take a dose.
+        // The patient still needs to follow their prescription.
+        final nowMinutes = at.hour * 60 + at.minute;
+        final crossesMidnight = exact.single.schedule.any((schedule) {
+          final scheduledMinutes =
+              schedule.time.hour * 60 + schedule.time.minute;
+          final distance = (scheduledMinutes - nowMinutes).abs();
+          return distance > 1380;
+        });
+        // A taken flag represents the current date only. Near midnight the
+        // adjacent day's dose cannot be checked from that flag alone.
+        if (crossesMidnight) {
+          return PrescriptionScanCheck(
+            PrescriptionScanVerdict.unclear,
+            exact.single,
+          );
+        }
+        final near = exact.single.schedule.where((schedule) {
+          final scheduledMinutes =
+              schedule.time.hour * 60 + schedule.time.minute;
+          return (scheduledMinutes - nowMinutes).abs() <= 60;
+        }).toList();
+        if (near.isEmpty) {
+          return PrescriptionScanCheck(
+            PrescriptionScanVerdict.outsideScheduledTime,
+            exact.single,
+          );
+        }
+        if (near.every((schedule) => schedule.taken)) {
+          return PrescriptionScanCheck(
+            PrescriptionScanVerdict.alreadyRecorded,
+            exact.single,
+          );
+        }
+      }
       return PrescriptionScanCheck(
         PrescriptionScanVerdict.matchesPlan,
         exact.first,

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -255,6 +256,16 @@ class TtsProvider extends ChangeNotifier {
   Future<void> _speakActiveRequest(_SpeechRequest request) async {
     try {
       await _initialization;
+      if (_disposed || !identical(_activeSpeech, request)) return;
+      if (Platform.isIOS) {
+        // Speech recognition uses the shared AVAudioSession for input. Restore
+        // an output category for every utterance, including the first prompt
+        // after a voice command and each repeat of an opened dose alarm.
+        await _flutterTts.setIosAudioCategory(
+          IosTextToSpeechAudioCategory.playback,
+          const [IosTextToSpeechAudioCategoryOptions.duckOthers],
+        );
+      }
       if (_disposed || !identical(_activeSpeech, request)) return;
       await _updateTtsLanguage();
       if (_disposed || !identical(_activeSpeech, request)) return;

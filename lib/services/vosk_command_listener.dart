@@ -10,15 +10,16 @@ import 'package:vosk_flutter/vosk_flutter.dart';
 
 import 'vosk_command_dispatcher.dart';
 
-/// Android-only, continuous, offline Vosk listener for short commands.
+/// Uses Vosk on Android and on-device system speech on iOS for short commands.
 ///
-/// [VoskModelStore] owns model download/extraction; this class consumes only
-/// its validated absolute model directory and streams microphone audio.
+/// [VoskModelStore] owns the Android model download/extraction; this class
+/// consumes its validated path or iOS's system speech sentinel.
 class VoskCommandListener {
   VoskCommandListener({
     required this.onCommand,
     this.onPartial,
     this.onFinalText,
+    this.iosLocale,
     VoskCommandDispatcher? dispatcher,
   }) : _dispatcher = dispatcher ?? const VoskCommandDispatcher();
 
@@ -32,11 +33,13 @@ class VoskCommandListener {
   static const preferredTranscriptSettle = Duration(milliseconds: 450);
   static const audioReleaseSettle = Duration(milliseconds: 150);
   static const _voskChannel = MethodChannel('vosk_flutter');
+  static const _iosSpeechChannel = MethodChannel('medisense/ios_speech');
 
   final VoskCommandDispatcher _dispatcher;
   final FutureOr<void> Function(VoskCommand command) onCommand;
   final ValueChanged<String>? onPartial;
   final ValueChanged<String>? onFinalText;
+  final String Function()? iosLocale;
 
   // Delay plugin construction: its current microphone implementation is
   // Android-only, so merely constructing this class remains safe on iOS.
@@ -44,6 +47,7 @@ class VoskCommandListener {
   Model? _model;
   Recognizer? _recognizer;
   SpeechService? _speechService;
+  bool _iosReady = false;
   StreamSubscription<String>? _partialSubscription;
   StreamSubscription<String>? _resultSubscription;
   Future<void>? _initialization;
@@ -72,13 +76,13 @@ class VoskCommandListener {
     return true;
   }
 
-  /// [absoluteModelPath] is the validated, already-unzipped path supplied by
-  /// [VoskModelStore]. This listener never downloads or extracts a model.
+  /// [absoluteModelPath] is the validated Android model or iOS speech sentinel
+  /// supplied by [VoskModelStore]. This listener never downloads a model.
   Future<void> initialize(String absoluteModelPath) {
     if (_disposed) {
       return Future<void>.error(StateError('Vosk listener has been disposed.'));
     }
-    if (_speechService != null) return Future<void>.value();
+    if (_speechService != null || _iosReady) return Future<void>.value();
     final pending = _initialization;
     if (pending != null) return pending;
     final future = _initialize(absoluteModelPath);
@@ -95,6 +99,22 @@ class VoskCommandListener {
         'absoluteModelPath',
         'Must be absolute.',
       );
+    }
+    if (Platform.isIOS) {
+      _iosSpeechChannel.setMethodCallHandler((call) async {
+        if (_disposed) return;
+        final text = call.arguments as String? ?? '';
+        if (call.method == 'partial') {
+          _handlePartial(jsonEncode({'partial': text}));
+        } else if (call.method == 'result') {
+          await _handleResult(jsonEncode({'text': text}));
+        } else if (call.method == 'error') {
+          debugPrint('iOS speech recognition failed: $text');
+          await stop();
+        }
+      });
+      _iosReady = true;
+      return;
     }
     if (!Platform.isAndroid) {
       throw UnsupportedError(
@@ -157,7 +177,7 @@ class VoskCommandListener {
 
   Future<void> start({String? absoluteModelPath}) async {
     if (_disposed) throw StateError('Vosk listener has been disposed.');
-    if (_speechService == null) {
+    if (_speechService == null && !_iosReady) {
       if (absoluteModelPath == null) {
         throw StateError(
           'Initialize Vosk with an absolute model path before starting.',
@@ -167,11 +187,27 @@ class VoskCommandListener {
     }
     await ensureMicrophonePermission();
     if (_isListening) return;
+    if (Platform.isIOS) {
+      _isListening = true;
+      try {
+        await _iosSpeechChannel.invokeMethod<void>('start', {
+          'locale': iosLocale?.call() ?? 'en-PH',
+        });
+      } catch (_) {
+        _isListening = false;
+        rethrow;
+      }
+      return;
+    }
     await _speechService!.start();
     _isListening = true;
   }
 
   Future<void> ensureMicrophonePermission() async {
+    if (Platform.isIOS) {
+      await _iosSpeechChannel.invokeMethod<void>('prepare');
+      return;
+    }
     var permission = await Permission.microphone.status;
     if (!permission.isGranted) {
       permission = await Permission.microphone.request();
@@ -222,7 +258,7 @@ class VoskCommandListener {
     if (_sessionCompleter != null) {
       throw StateError('A Vosk command session is already active.');
     }
-    if (_recognizer == null) {
+    if (_recognizer == null && !_iosReady) {
       throw StateError('Initialize Vosk before starting a command session.');
     }
     final completer = _sessionCompleter = Completer<String?>();
@@ -283,7 +319,11 @@ class VoskCommandListener {
     _isListening = false;
     try {
       if (wasListening) {
-        await _speechService?.stop();
+        if (Platform.isIOS) {
+          await _iosSpeechChannel.invokeMethod<void>('stop');
+        } else {
+          await _speechService?.stop();
+        }
         // Android's AudioRecord teardown can complete slightly after the
         // method-channel reply. Give audio focus time to settle before TTS.
         await Future<void>.delayed(audioReleaseSettle);
@@ -477,8 +517,9 @@ class VoskCommandListener {
   /// Call from the owning provider/widget's dispose method.
   Future<void> dispose() async {
     if (_disposed) return;
-    _disposed = true;
     await stop();
+    _disposed = true;
+    if (Platform.isIOS) _iosSpeechChannel.setMethodCallHandler(null);
     _silenceTimer?.cancel();
     await _partialSubscription?.cancel();
     await _resultSubscription?.cancel();

@@ -5,6 +5,7 @@ import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'cloud_vision_service.dart';
+import 'cloud_ocr_consent.dart';
 import 'medication_database_service.dart';
 import 'medicine_label_parser.dart';
 import 'ocr_coordinator_exceptions.dart';
@@ -36,8 +37,8 @@ class OcrScanResult {
   final OcrResultSource source;
 }
 
-/// Runs on-device Latin ML Kit first, then silently tries Cloud Vision only
-/// when the local result is incomplete or low-confidence. Reuse one instance
+/// Runs on-device Latin ML Kit first, then tries Cloud Vision only with stored
+/// user consent when the local result is incomplete. Reuse one instance
 /// for the scanner lifecycle and call [dispose] when it ends.
 ///
 /// Free-tier usage is stored locally as requested. For billing-grade quota
@@ -147,6 +148,16 @@ class OcrCoordinatorService {
       localWasUnclear: !local.complete,
     );
     if (!allowCloudFallback || local.complete || !_cloudVision.isConfigured) {
+      return assessedLocalResult;
+    }
+
+    // Consent defaults to false, including when preferences cannot be read.
+    try {
+      final preferences = await _loadPreferences();
+      if (!CloudOcrConsent.isGranted(preferences)) {
+        return assessedLocalResult;
+      }
+    } on Object {
       return assessedLocalResult;
     }
 

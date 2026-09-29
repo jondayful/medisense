@@ -12,13 +12,14 @@ import 'ocr_coordinator_exceptions.dart';
 /// `--dart-define` at build time. Google API keys in a mobile app are
 /// extractable: create separate keys, restrict each to the Vision API, then
 /// apply Android package/signing-certificate or iOS bundle-ID restrictions.
+/// Android builds also need `CLOUD_VISION_ANDROID_SHA1` for the request header.
 /// Never put service-account credentials in the app.
 class CloudVisionService {
   CloudVisionService({
     http.Client? client,
     String? apiKey,
     this.timeout = const Duration(seconds: 4),
-    this.maxImageBytes = 10 * 1024 * 1024,
+    this.maxImageBytes = 7 * 1024 * 1024,
   }) : _client = client ?? http.Client(),
        _ownsClient = client == null,
        _apiKey = (apiKey ?? _buildTimeApiKey).trim() {
@@ -46,6 +47,46 @@ class CloudVisionService {
     }
     return const String.fromEnvironment('CLOUD_VISION_API_KEY');
   }
+
+  static const _androidPackage = String.fromEnvironment(
+    'CLOUD_VISION_ANDROID_PACKAGE',
+    defaultValue: 'com.matech.medisense',
+  );
+  static const _androidSha1 = String.fromEnvironment(
+    'CLOUD_VISION_ANDROID_SHA1',
+  );
+  static const _iosBundleId = String.fromEnvironment(
+    'CLOUD_VISION_IOS_BUNDLE_ID',
+    defaultValue: 'com.matech.medisense',
+  );
+
+  Map<String, String> get _requestHeaders {
+    final headers = <String, String>{
+      'Content-Type': 'application/json',
+      'x-goog-api-key': _apiKey,
+    };
+    if (Platform.isAndroid) {
+      final fingerprint = _androidSha1.replaceAll(':', '').toUpperCase();
+      if (fingerprint.length != 40 ||
+          !RegExp(r'^[0-9A-F]{40}$').hasMatch(fingerprint)) {
+        throw const CloudVisionConfigurationException();
+      }
+      headers['X-Android-Package'] = _androidPackage;
+      headers['X-Android-Cert'] = fingerprint;
+    } else if (Platform.isIOS) {
+      headers['X-Ios-Bundle-Identifier'] = _iosBundleId;
+    }
+    return headers;
+  }
+
+  /// A checkout for cloud OCR must not be offered by a build with no Vision key.
+  /// This checks configuration only; a request can still fail or be unavailable.
+  static bool get isConfiguredForThisBuild =>
+      _buildTimeApiKey.isNotEmpty &&
+      (!Platform.isAndroid ||
+          RegExp(
+            r'^[0-9A-Fa-f]{40}$',
+          ).hasMatch(_androidSha1.replaceAll(':', '')));
 
   bool get isConfigured => _apiKey.isNotEmpty && !_disposed;
 
@@ -88,9 +129,7 @@ class CloudVisionService {
       );
     }
 
-    final uri = Uri.https('vision.googleapis.com', '/v1/images:annotate', {
-      'key': _apiKey,
-    });
+    final uri = Uri.https('vision.googleapis.com', '/v1/images:annotate');
     final body = jsonEncode({
       'requests': [
         {
@@ -105,11 +144,7 @@ class CloudVisionService {
     late final http.Response response;
     try {
       response = await _client
-          .post(
-            uri,
-            headers: const {'Content-Type': 'application/json'},
-            body: body,
-          )
+          .post(uri, headers: _requestHeaders, body: body)
           .timeout(timeout);
     } on TimeoutException {
       throw const CloudVisionTimeoutException();

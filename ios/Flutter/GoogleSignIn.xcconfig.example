@@ -1,0 +1,4 @@
+// Copy to GoogleSignIn.xcconfig and use the iOS OAuth client registered for
+// com.matech.medisense. The URL scheme is the reversed iOS client ID.
+IOS_GOOGLE_CLIENT_ID = YOUR_IOS_CLIENT_ID.apps.googleusercontent.com
+IOS_GOOGLE_URL_SCHEME = com.googleusercontent.apps.YOUR_IOS_CLIENT_ID

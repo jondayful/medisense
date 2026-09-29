@@ -162,7 +162,7 @@ class SupabaseSyncService {
         final message = data is Map ? data['error']?.toString() : null;
         throw StateError(message ?? 'Could not send the invitation email.');
       }
-      if (data is! Map || data['pairing'] is! Map) {
+      if (data is! Map || data['status'] != 'request_processed') {
         throw StateError(
           'The invitation service returned an invalid response.',
         );
@@ -335,11 +335,15 @@ class SupabaseSyncService {
 
   Future<Map<String, dynamic>?> getUserProfile(String userId) async {
     final uuid = nullableUuid(userId);
-    if (uuid == null) return null;
+    if (!isInitialized ||
+        uuid == null ||
+        SupabaseService.client.auth.currentUser?.id != uuid) {
+      return null;
+    }
     final result = await _withTimeout(
       () => SupabaseService.client
           .from('profiles')
-          .select()
+          .select('id,email,name,role,tier,auth_provider')
           .eq('id', uuid)
           .maybeSingle(),
     );
@@ -347,10 +351,16 @@ class SupabaseSyncService {
   }
 
   Future<Map<String, dynamic>?> findUserByEmail(String email) async {
+    if (!isInitialized) return null;
+    final currentUser = SupabaseService.client.auth.currentUser;
+    if (currentUser == null ||
+        currentUser.email?.toLowerCase() != email.toLowerCase()) {
+      return null;
+    }
     final result = await _withTimeout(
       () => SupabaseService.client
           .from('profiles')
-          .select()
+          .select('id,email,name,role,tier,auth_provider')
           .eq('email', email.toLowerCase())
           .maybeSingle(),
     );

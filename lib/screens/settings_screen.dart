@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../theme/app_theme.dart';
 import '../models/accessibility_mode.dart';
 import '../models/voice_levels.dart';
@@ -14,6 +15,7 @@ import '../widgets/elder_bottom_nav.dart';
 import '../widgets/mode_card.dart';
 import '../widgets/medi_bottom_nav.dart';
 import '../widgets/voice_level_picker.dart';
+import '../widgets/sync_status_tile.dart';
 import 'user_manual_screen.dart';
 
 String _verbosityDescription(TtsVerbosity verbosity) {
@@ -52,6 +54,63 @@ class SettingsScreen extends StatelessWidget {
     }
     appState.toggleNotifications();
     await context.read<MedicationProvider>().syncMedicationAlarms();
+  }
+
+  Future<void> _setCloudScanConsent(BuildContext context, bool enabled) async {
+    final appState = context.read<AppStateProvider>();
+    if (!enabled) {
+      await appState.setCloudOcrConsent(false);
+      return;
+    }
+
+    final agreed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Send unclear scans to Google?'),
+        content: const Text(
+          'A medicine-label image may reveal health information. If you agree, '
+          'the app may send a captured image to Google Cloud Vision when the '
+          'on-device scan is incomplete and you are online. Cloud scanning is '
+          'optional. You can turn it off here at any time.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Keep scans on device'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('I agree'),
+          ),
+        ],
+      ),
+    );
+    if (agreed == true && context.mounted) {
+      await appState.setCloudOcrConsent(true);
+    }
+  }
+
+  Future<void> _requestPrivacyHelp(BuildContext context) async {
+    final uri = Uri(
+      scheme: 'mailto',
+      path: 'support@matech.uno',
+      queryParameters: {'subject': 'MediSense privacy request'},
+    );
+    bool opened;
+    try {
+      opened = await launchUrl(uri);
+    } catch (_) {
+      opened = false;
+    }
+    if (!opened && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Email support@matech.uno for access, correction, or deletion requests.',
+          ),
+        ),
+      );
+    }
   }
 
   @override
@@ -228,6 +287,49 @@ class SettingsScreen extends StatelessWidget {
                   onChanged: (_) => appState.toggleDarkMode(),
                   activeTrackColor: accent,
                 ),
+                Divider(height: 1, indent: 16, endIndent: 16, color: divider),
+                SwitchListTile(
+                  contentPadding: tilePadding,
+                  title: Text(
+                    'Cloud scan assistance',
+                    style: AppTheme.textStyle(
+                      fontSize: rowTitleSize,
+                      fontWeight: FontWeight.w700,
+                      color: primary,
+                    ),
+                  ),
+                  subtitle: Text(
+                    'When a local scan is unclear, send its image to Google Cloud Vision. Off by default.',
+                    style: AppTheme.textStyle(
+                      fontSize: captionSize,
+                      color: secondary,
+                      height: 1.3,
+                    ),
+                  ),
+                  secondary: Icon(
+                    Icons.cloud_upload_outlined,
+                    color: accent,
+                    size: rowIconSize,
+                  ),
+                  value: appState.cloudOcrConsent,
+                  onChanged: (enabled) =>
+                      _setCloudScanConsent(context, enabled),
+                  activeTrackColor: accent,
+                ),
+                if (authProvider.isLoggedIn && authProvider.isPatient) ...[
+                  Divider(height: 1, indent: 16, endIndent: 16, color: divider),
+                  SyncStatusTile(
+                    key: ValueKey(authProvider.userId),
+                    userId: authProvider.userId,
+                    contentPadding: tilePadding,
+                    titleSize: rowTitleSize,
+                    captionSize: captionSize,
+                    iconSize: rowIconSize,
+                    accent: accent,
+                    primary: primary,
+                    secondary: secondary,
+                  ),
+                ],
               ],
             ),
           ),
@@ -525,6 +627,34 @@ class SettingsScreen extends StatelessWidget {
                   ),
                   trailing: Icon(Icons.chevron_right_rounded, color: secondary),
                   onTap: () => context.push('/privacy'),
+                ),
+                Divider(height: 1, indent: 16, endIndent: 16, color: divider),
+                ListTile(
+                  contentPadding: tilePadding,
+                  minVerticalPadding: isElder ? 14 : 8,
+                  leading: Icon(
+                    Icons.contact_support_outlined,
+                    color: accent,
+                    size: rowIconSize,
+                  ),
+                  title: Text(
+                    'Privacy and data requests',
+                    style: AppTheme.textStyle(
+                      fontSize: rowTitleSize,
+                      fontWeight: FontWeight.w700,
+                      color: primary,
+                    ),
+                  ),
+                  subtitle: Text(
+                    'Request access, correction, or deletion by email. Do not include medicine details in the message.',
+                    style: AppTheme.textStyle(
+                      fontSize: captionSize,
+                      color: secondary,
+                      height: 1.3,
+                    ),
+                  ),
+                  trailing: Icon(Icons.chevron_right_rounded, color: secondary),
+                  onTap: () => _requestPrivacyHelp(context),
                 ),
               ],
             ),

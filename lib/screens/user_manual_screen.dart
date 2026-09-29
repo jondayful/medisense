@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -923,7 +925,7 @@ class _ManualChapter {
   final List<String> itemsFilipino;
 }
 
-const _chapters = <_ManualChapter>[
+final _chapters = <_ManualChapter>[
   _ManualChapter(
     icon: Icons.home_rounded,
     titleEnglish: 'Home and today’s doses',
@@ -953,6 +955,7 @@ const _chapters = <_ManualChapter>[
       'A detected expired medicine is blocked. A month-and-year expiry remains valid through the final day of that month.',
       'The expiration date is saved in the schedule. A warning appears in the schedule during the 30 days before expiry, and an expired scan is announced aloud.',
       'After confirmation, choose frequency and time before saving.',
+      'Cloud scan assistance is off by default. Enable it in Settings only if you agree to send unclear scan images to Google Cloud Vision.',
     ],
     itemsFilipino: [
       'Ipatong ang pakete sa maliwanag at hindi gumagalaw na lugar, at ilagay ang label sa loob ng guide.',
@@ -960,6 +963,7 @@ const _chapters = <_ManualChapter>[
       'Hindi maaaring idagdag ang gamot na expired na. Ang buwan at taon na expiry ay valid hanggang huling araw ng buwan.',
       'Nase-save ang expiration date sa iskedyul. May babala sa iskedyul sa loob ng 30 araw bago ito mag-expire, at binibigkas ang babala kapag expired na ang na-scan.',
       'Pagkatapos kumpirmahin, piliin ang dalas at oras bago i-save.',
+      'Naka-off ang cloud scan assistance sa simula. I-on lamang ito sa Settings kung pumapayag kang ipadala sa Google Cloud Vision ang larawang hindi malinaw.',
     ],
   ),
   _ManualChapter(
@@ -971,14 +975,22 @@ const _chapters = <_ManualChapter>[
     itemsEnglish: [
       'Open Schedule to see every saved medicine grouped by time of day.',
       'Open a medicine to review or change its dosage, frequency, and times.',
-      'Keep Medication alarms enabled in Settings. At dose time, the phone plays its alarm sound and repeats vibration until you stop or snooze it.',
-      'Set the phone’s Alarm volume to a level you can hear. Android needs Alarms & reminders access and notification permission for the alarm controls.',
+      Platform.isIOS
+          ? 'Keep Medication alarms enabled in Settings. At dose time, iPhone shows a notification with Mark Taken and Snooze 5 min actions.'
+          : 'Keep Medication alarms enabled in Settings. At dose time, the phone plays its alarm sound and repeats vibration until you stop or snooze it.',
+      Platform.isIOS
+          ? 'Allow notifications and Time Sensitive alerts for MediSense in iPhone Settings. Open the reminder to hear the spoken alarm.'
+          : 'Set the phone’s Alarm volume to a level you can hear. Android needs Alarms & reminders access and notification permission for the alarm controls.',
     ],
     itemsFilipino: [
       'Buksan ang Schedule para makita ang lahat ng gamot ayon sa oras ng araw.',
       'Buksan ang isang gamot para suriin o baguhin ang dosage, dalas, at oras.',
-      'Panatilihing naka-on ang Medication alarms sa Settings. Sa oras ng dose, tutunog ang alarm ng telepono at uulit ang vibration hanggang ihinto o i-snooze mo ito.',
-      'Itakda ang Alarm volume ng telepono sa lakas na maririnig mo. Kailangan ng Android ang Alarms & reminders access at notification permission para sa mga control ng alarm.',
+      Platform.isIOS
+          ? 'Panatilihing naka-on ang Medication alarms sa Settings. Sa oras ng dose, may notification na may Mark Taken at Snooze 5 min.'
+          : 'Panatilihing naka-on ang Medication alarms sa Settings. Sa oras ng dose, tutunog ang alarm ng telepono at uulit ang vibration hanggang ihinto o i-snooze mo ito.',
+      Platform.isIOS
+          ? 'Payagan ang notifications at Time Sensitive alerts para sa MediSense sa iPhone Settings. Buksan ang paalala para marinig ang binibigkas na alarm.'
+          : 'Itakda ang Alarm volume ng telepono sa lakas na maririnig mo. Kailangan ng Android ang Alarms & reminders access at notification permission para sa mga control ng alarm.',
     ],
   ),
   _ManualChapter(
@@ -990,6 +1002,7 @@ const _chapters = <_ManualChapter>[
         'Mag-navigate at makinig sa iskedyul kahit walang internet.',
     itemsEnglish: [
       'Enable Voice Navigation in Settings, tap the microphone, and wait until the listening prompt finishes.',
+      'To add a medicine by voice, say Add Biogesic, answer the dose, form, expiry, frequency, and time prompts, then listen to the summary before saying yes to save.',
       'Schedule: “What is my medicine schedule?” or “Ano ang mga gamot ko?”',
       'Time of day: “Anong iinumin ko ng umaga?” or “Night medicine.”',
       'Next dose: “Anong susunod na gamot ko?” or “What is my next medication?”',
@@ -1001,10 +1014,13 @@ const _chapters = <_ManualChapter>[
       'Remove a medicine: say “I do not want to take Biogesic anymore.” Confirm the removal on screen.',
       'Move a dose: say “Move Biogesic to 8 AM.” The next pending dose time will change.',
       'Speech controls: “Lakasan ang boses,” “Hinaan ang boses,” or “Ulitin mo.”',
-      'The voice package needs internet only for its first download. Recognition stays on the device afterward.',
+      Platform.isIOS
+          ? 'iPhone uses Apple on-device speech recognition. There is no Vosk download. The selected language must be available for offline recognition on your iPhone.'
+          : 'The voice package needs internet only for its first download. Recognition stays on the device afterward.',
     ],
     itemsFilipino: [
       'I-on ang Voice Navigation sa Settings, pindutin ang mikropono, at hintaying matapos ang listening prompt.',
+      'Para magdagdag ng gamot sa boses, sabihin ang Magdagdag ng Biogesic, sagutin ang dose, anyo, expiry, dalas, at oras, at pakinggan ang buod bago sabihin ang yes.',
       'Iskedyul: “Ano ang mga gamot ko?” o “What is my medicine schedule?”',
       'Oras ng araw: “Anong iinumin ko ng umaga?” o “Night medicine.”',
       'Susunod na gamot: “Anong susunod na gamot ko?” o “What is my next medication?”',
@@ -1016,7 +1032,9 @@ const _chapters = <_ManualChapter>[
       'Para mag-alis: sabihin ang “Hindi ko na iinumin ang Biogesic.” Kumpirmahin ang pag-alis sa screen.',
       'Para maglipat ng oras: sabihin ang “Lipat mo nga ng 8 AM yung Biogesic.” Ililipat ang susunod na pending dose.',
       'Boses: “Lakasan ang boses,” “Hinaan ang boses,” o “Ulitin mo.”',
-      'Internet lang ang kailangan sa unang download ng voice package. Sa device ginagawa ang pagkilala pagkatapos nito.',
+      Platform.isIOS
+          ? 'Gumagamit ang iPhone ng Apple on-device speech recognition. Walang ida-download na Vosk. Kailangang available sa iPhone ang offline recognition para sa napiling wika.'
+          : 'Internet lang ang kailangan sa unang download ng voice package. Sa device ginagawa ang pagkilala pagkatapos nito.',
     ],
   ),
   _ManualChapter(

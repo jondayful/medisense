@@ -1045,7 +1045,9 @@ class _PairPatientSheetState extends State<_PairPatientSheet> {
       Navigator.of(context).pop();
       messenger.showSnackBar(
         SnackBar(
-          content: Text('Invitation email sent to $email.'),
+          content: const Text(
+            'If this address belongs to a patient, they will receive an invitation to review.',
+          ),
           backgroundColor: AppTheme.success,
           duration: const Duration(seconds: 4),
         ),

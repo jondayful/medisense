@@ -29,7 +29,7 @@ class DatabaseHelper {
 
     return await openDatabase(
       path,
-      version: 10,
+      version: 11,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       onConfigure: _onConfigure,
@@ -514,6 +514,7 @@ class DatabaseHelper {
     Map<String, dynamic> medication,
     List<Map<String, dynamic>> schedules, {
     required bool replaceSchedules,
+    String? syncUserId,
   }) async {
     final db = await database;
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -572,6 +573,26 @@ class DatabaseHelper {
             whereArgs: [scheduleId, medId],
           );
         }
+      }
+      if (syncUserId != null) {
+        await _writeSyncOperation(
+          txn,
+          id: 'medication:$syncUserId:$medId',
+          operation: 'medication',
+          userId: syncUserId,
+          payload: {
+            ...medication,
+            'schedules': [
+              for (final schedule in schedules)
+                {
+                  'id': schedule['id'],
+                  'label': schedule['label'],
+                  'hour': schedule['hour'],
+                  'minute': schedule['minute'],
+                },
+            ],
+          },
+        );
       }
     });
   }
@@ -658,13 +679,28 @@ class DatabaseHelper {
     );
   }
 
-  Future<void> deleteMedication(String id, String userId) async {
+  Future<void> deleteMedication(
+    String id,
+    String userId, {
+    String? syncUserId,
+  }) async {
     final db = await database;
-    await db.delete(
-      'medications',
-      where: 'id = ? AND user_id = ?',
-      whereArgs: [id, userId],
-    );
+    await db.transaction((txn) async {
+      final deleted = await txn.delete(
+        'medications',
+        where: 'id = ? AND user_id = ?',
+        whereArgs: [id, userId],
+      );
+      if (deleted > 0 && syncUserId != null) {
+        await _writeSyncOperation(
+          txn,
+          id: 'medication:$syncUserId:$id',
+          operation: 'deleteMedication',
+          userId: syncUserId,
+          payload: {'medicationId': id},
+        );
+      }
+    });
   }
 
   Future<void> updateScheduleTime(
@@ -672,14 +708,28 @@ class DatabaseHelper {
     required String label,
     required int hour,
     required int minute,
+    String? syncUserId,
+    Map<String, dynamic>? syncPayload,
   }) async {
     final db = await database;
-    await db.update(
-      'schedules',
-      {'label': label, 'hour': hour, 'minute': minute},
-      where: 'id = ?',
-      whereArgs: [scheduleId],
-    );
+    await db.transaction((txn) async {
+      final updated = await txn.update(
+        'schedules',
+        {'label': label, 'hour': hour, 'minute': minute},
+        where: 'id = ?',
+        whereArgs: [scheduleId],
+      );
+      if (updated > 0 && syncUserId != null && syncPayload != null) {
+        final medId = syncPayload['id'] as String;
+        await _writeSyncOperation(
+          txn,
+          id: 'medication:$syncUserId:$medId',
+          operation: 'medication',
+          userId: syncUserId,
+          payload: syncPayload,
+        );
+      }
+    });
   }
 
   Future<List<Map<String, dynamic>>> getTodayLogsForMedication(
@@ -834,13 +884,18 @@ class DatabaseHelper {
   }
 
   Future<List<Map<String, dynamic>>> pendingSyncOperations({
+    String? userId,
     int limit = 100,
   }) async {
     final db = await database;
     final rows = await db.query(
       'sync_outbox',
-      where: 'retry_after <= ?',
-      whereArgs: [DateTime.now().millisecondsSinceEpoch],
+      where: userId == null
+          ? 'retry_after <= ?'
+          : 'user_id = ? AND retry_after <= ?',
+      whereArgs: userId == null
+          ? [DateTime.now().millisecondsSinceEpoch]
+          : [userId, DateTime.now().millisecondsSinceEpoch],
       orderBy: 'created_at ASC',
       limit: limit,
     );
@@ -855,6 +910,29 @@ class DatabaseHelper {
           },
         )
         .toList(growable: false);
+  }
+
+  /// Includes operations waiting for a retry. Do not expose their payloads in UI.
+  Future<int> queuedSyncOperationCount(String userId) async {
+    final db = await database;
+    final rows = await db.rawQuery(
+      'SELECT COUNT(*) AS total FROM sync_outbox WHERE user_id = ?',
+      [userId],
+    );
+    return (rows.single['total'] as int?) ?? 0;
+  }
+
+  Future<int?> nextSyncRetryAt(String userId) async {
+    final db = await database;
+    final rows = await db.query(
+      'sync_outbox',
+      columns: ['retry_after'],
+      where: 'user_id = ?',
+      whereArgs: [userId],
+      orderBy: 'retry_after ASC',
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first['retry_after'] as int;
   }
 
   Future<void> completeSyncOperation(

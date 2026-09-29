@@ -76,6 +76,7 @@ app.*.map.json
 /functions/.env.*
 !/functions/.env.example
 /functions/.secret.local
+/cloud_vision.defines.json
 
 # Signing
 /android/key.properties
@@ -88,3 +89,9 @@ app.*.map.json
 /tooling/ph_fda_drug_products.csv
 PRODUCT.md
 .impeccable/config.json
+ios/BUILDING.md
+CLOUD_VISION_SETUP.md
+PRIVACY_CONTROLS.md
+tool/TRIALS.md
+CODEMAGIC_TESTFLIGHT.md
+CODEMAGIC_WINDOWS_IPHONE.md

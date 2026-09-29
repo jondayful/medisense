@@ -34,11 +34,23 @@
 				<string>medisense</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>$(IOS_GOOGLE_URL_SCHEME)</string>
+			</array>
+		</dict>
 	</array>
+	<key>GIDClientID</key>
+	<string>$(IOS_GOOGLE_CLIENT_ID)</string>
+	<key>GIDServerClientID</key>
+	<string>667948555890-obght55e2oc8g3klgas96iqudsa34s37.apps.googleusercontent.com</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This app requires microphone access for offline voice navigation and assistant features.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>This app recognizes spoken medication commands on your device for voice navigation and guided entry.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>This app uses the camera to read medicine labels and prefill medication details.</string>
 	<key>UIApplicationSceneManifest</key>

@@ -8,6 +8,7 @@ import '../models/accessibility_mode.dart';
 import '../providers/app_state_provider.dart';
 import '../providers/auth_provider.dart';
 import '../services/subscription_service.dart';
+import '../services/cloud_vision_service.dart';
 import '../services/supabase_service.dart';
 import '../services/supabase_sync_service.dart';
 import '../services/password_rules.dart';
@@ -838,7 +839,9 @@ class _SubscriptionSheetState extends State<_SubscriptionSheet> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('We could not start checkout. Please try again.'),
+            content: Text(
+              'Checkout is unavailable. Check that cloud scanning and account services are configured, then try again.',
+            ),
           ),
         );
       }
@@ -852,6 +855,9 @@ class _SubscriptionSheetState extends State<_SubscriptionSheet> {
     final isLarge = _usesLargeText(context);
     final ink = AppTheme.actionColor(context);
     final muted = AppTheme.secondaryTextColor(context);
+    final canOfferCloudPlan =
+        CloudVisionService.isConfiguredForThisBuild &&
+        SupabaseService.isConfigured;
     return _Sheet(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(20, 0, 20, 22),
@@ -893,7 +899,7 @@ class _SubscriptionSheetState extends State<_SubscriptionSheet> {
               ),
               const SizedBox(height: 8),
               Text(
-                'Smart offline scanning is included. Pro adds extra help for difficult labels and families.',
+                'On-device scanning and the Guardian dashboard are available without a paid plan. Paid plans remove the app\'s daily limit on optional cloud OCR fallback.',
                 textAlign: TextAlign.center,
                 style: AppTheme.textStyle(
                   fontSize: isLarge ? 18 : 15,
@@ -920,10 +926,9 @@ class _SubscriptionSheetState extends State<_SubscriptionSheet> {
               ),
               const SizedBox(height: 20),
               ...const [
-                'Unlimited cloud scans',
-                'Guardian family dashboard',
-                'Priority medication alerts',
-                'Custom voice profiles',
+                'Cloud OCR is used only when an on-device scan is incomplete.',
+                'You must opt in to sending label images to Google Cloud Vision.',
+                'Cloud scanning needs an internet connection and may be unavailable.',
               ].map(
                 (f) => Padding(
                   padding: const EdgeInsets.only(bottom: 9),
@@ -943,8 +948,19 @@ class _SubscriptionSheetState extends State<_SubscriptionSheet> {
                 ),
               ),
               const SizedBox(height: 14),
+              if (!canOfferCloudPlan)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Text(
+                    'Purchases are unavailable in this app build because cloud scanning or account services are not configured.',
+                    style: AppTheme.textStyle(
+                      fontSize: isLarge ? 16 : 13,
+                      color: muted,
+                    ),
+                  ),
+                ),
               FilledButton(
-                onPressed: loading ? null : checkout,
+                onPressed: loading || !canOfferCloudPlan ? null : checkout,
                 style: _button(context),
                 child: Text(
                   loading
@@ -954,7 +970,7 @@ class _SubscriptionSheetState extends State<_SubscriptionSheet> {
               ),
               const SizedBox(height: 10),
               Text(
-                'By continuing, you agree to the Terms of Service. You can cancel renewal anytime.',
+                'Checkout grants a fixed plan period after payment is verified. The app does not renew or charge you automatically. Review the Terms and Privacy Policy before paying.',
                 textAlign: TextAlign.center,
                 style: AppTheme.textStyle(
                   fontSize: isLarge ? 15 : 12,

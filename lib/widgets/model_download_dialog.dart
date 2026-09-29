@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 
@@ -10,6 +11,9 @@ Future<String?> showModelDownloadDialog(
   BuildContext context, {
   required VoskModelStore store,
 }) {
+  if (Platform.isIOS) {
+    return Future<String?>.value(VoskModelStore.iosSystemSpeechPath);
+  }
   return showModalBottomSheet<String>(
     context: context,
     isDismissible: false,

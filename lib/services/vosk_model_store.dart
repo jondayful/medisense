@@ -11,6 +11,9 @@ import 'package:path_provider/path_provider.dart';
 /// Downloads, validates, and stores the Tagalog Vosk model outside the app
 /// bundle. A completed model is never downloaded again.
 class VoskModelStore extends ChangeNotifier {
+  // The iOS listener uses the system's on-device speech assets instead of the
+  // Android-only Vosk plugin and its large downloaded model.
+  static const iosSystemSpeechPath = '/ios-system-speech';
   static const modelName = 'vosk-model-tl-ph-generic-0.6';
   static const modelUrl =
       'https://alphacephei.com/vosk/models/vosk-model-tl-ph-generic-0.6.zip';
@@ -44,6 +47,7 @@ class VoskModelStore extends ChangeNotifier {
   /// before presenting download UI, so an existing model never flashes the
   /// download sheet while it is being validated.
   Future<String?> installedModelPath() {
+    if (Platform.isIOS) return Future<String?>.value(iosSystemSpeechPath);
     final cached = _validatedModelPath;
     if (cached != null) return Future<String?>.value(cached);
     return _installedModelCheck ??= _findInstalledModel().whenComplete(() {
@@ -61,10 +65,13 @@ class VoskModelStore extends ChangeNotifier {
 
   /// Returns the absolute extracted model directory. It is safe to call at
   /// startup: a valid existing model avoids all network activity.
-  Future<String> prepare() => _inFlight ??= _prepare().whenComplete(() {
-    _inFlight = null;
-    _notifyIfAlive();
-  });
+  Future<String> prepare() {
+    if (Platform.isIOS) return Future<String>.value(iosSystemSpeechPath);
+    return _inFlight ??= _prepare().whenComplete(() {
+      _inFlight = null;
+      _notifyIfAlive();
+    });
+  }
 
   void _notifyIfAlive() {
     if (!_disposed) notifyListeners();
@@ -85,6 +92,7 @@ class VoskModelStore extends ChangeNotifier {
   }
 
   Future<String> _prepare() async {
+    if (Platform.isIOS) return iosSystemSpeechPath;
     _cancelled = false;
     _error = null;
     final installed = await installedModelPath();

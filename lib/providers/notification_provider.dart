@@ -12,6 +12,7 @@ import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest.dart' as tz_data;
 import '../data/database_helper.dart';
 import '../services/medication_alarm_message.dart';
+import '../services/supabase_sync_service.dart';
 import 'medication_provider.dart';
 import 'tts_provider.dart';
 
@@ -36,7 +37,9 @@ Future<void> notificationBackgroundHandler(
     ),
   );
   if (response.id != null) {
-    await plugin.cancel(response.id!);
+    // iOS uses a repeating request for the next day's dose. Cancelling the
+    // request from an action isolate would remove every future reminder.
+    if (!Platform.isIOS) await plugin.cancel(response.id!);
   }
   if (response.actionId == 'mark_taken' && response.payload != null) {
     final medicationId = RegExp(
@@ -48,11 +51,48 @@ Future<void> notificationBackgroundHandler(
     if (medicationId != null && scheduleId != null) {
       // Keep the local SQLite source of truth current even when the user
       // acts from the lock-screen notification while the app is terminated.
-      await DatabaseHelper().updateAdherenceLog(
-        medicationId,
-        scheduleId,
-        'taken',
+      final helper = DatabaseHelper();
+      final db = await helper.database;
+      final rows = await db.query(
+        'medications',
+        columns: ['user_id'],
+        where: 'id = ?',
+        whereArgs: [medicationId],
+        limit: 1,
       );
+      final owner = rows.isEmpty ? null : rows.first['user_id'] as String?;
+      final userUuid = SupabaseSyncService.nullableUuid(owner);
+      final recordedAt = DateTime.now();
+      if (userUuid == null) {
+        await helper.updateAdherenceLog(
+          medicationId,
+          scheduleId,
+          'taken',
+          recordedAt: recordedAt,
+        );
+      } else {
+        final startOfDay = DateTime(
+          recordedAt.year,
+          recordedAt.month,
+          recordedAt.day,
+        ).millisecondsSinceEpoch;
+        final logId = '${medicationId}_${scheduleId}_$startOfDay';
+        await helper.updateAdherenceLogAndQueue(
+          medId: medicationId,
+          scheduleId: scheduleId,
+          status: 'taken',
+          recordedAt: recordedAt,
+          outboxId: 'adherence:$userUuid:$logId',
+          userId: userUuid,
+          payload: {
+            'medicationId': medicationId,
+            'scheduleId': scheduleId,
+            'status': 'taken',
+            'timestamp': recordedAt.millisecondsSinceEpoch,
+            'patientId': userUuid,
+          },
+        );
+      }
     }
   }
   final prefs = await SharedPreferences.getInstance();
@@ -119,18 +159,31 @@ class NotificationProvider extends ChangeNotifier {
     const AndroidInitializationSettings initializationSettingsAndroid =
         AndroidInitializationSettings('@mipmap/ic_launcher');
 
-    const DarwinInitializationSettings initializationSettingsIOS =
+    final DarwinInitializationSettings initializationSettingsIOS =
         DarwinInitializationSettings(
           requestAlertPermission: true,
           requestBadgePermission: true,
           requestSoundPermission: true,
-          // Apple only grants this after the Critical Alerts entitlement is
-          // approved. The request is harmless without the entitlement and falls
-          // back to normal/time-sensitive notification delivery.
-          requestCriticalPermission: true,
+          notificationCategories: [
+            DarwinNotificationCategory(
+              'medication_alarm',
+              actions: [
+                DarwinNotificationAction.plain(
+                  'mark_taken',
+                  'Mark Taken',
+                  options: {DarwinNotificationActionOption.foreground},
+                ),
+                DarwinNotificationAction.plain(
+                  'snooze',
+                  'Snooze 5 min',
+                  options: {DarwinNotificationActionOption.foreground},
+                ),
+              ],
+            ),
+          ],
         );
 
-    const InitializationSettings initializationSettings =
+    final InitializationSettings initializationSettings =
         InitializationSettings(
           android: initializationSettingsAndroid,
           iOS: initializationSettingsIOS,
@@ -239,7 +292,7 @@ class NotificationProvider extends ChangeNotifier {
             alert: true,
             badge: true,
             sound: true,
-            critical: true,
+            critical: false,
           ) ??
           true;
     }
@@ -272,6 +325,12 @@ class NotificationProvider extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_kPendingActionKey);
     if (raw == null) return;
+    try {
+      await _medicationProvider?.loadMedications(forceRefresh: true);
+    } catch (error) {
+      debugPrint('Could not load medication for notification action: $error');
+      return;
+    }
     await prefs.remove(_kPendingActionKey);
     try {
       final data = jsonDecode(raw) as Map<String, dynamic>;
@@ -290,11 +349,14 @@ class NotificationProvider extends ChangeNotifier {
       await prefs.remove(_kPendingActionKey);
       try {
         final data = jsonDecode(raw) as Map<String, dynamic>;
-        await _executeAction(
-          data['actionId'] as String?,
-          data['payload'] as String?,
-        );
-        return;
+        final actionId = data['actionId'] as String?;
+        final payload = data['payload'] as String?;
+        await _executeAction(actionId, payload);
+        // The launch-details callback can repeat the saved action. A later,
+        // different tap must still be handled instead of being discarded.
+        if (actionId == response.actionId && payload == response.payload) {
+          return;
+        }
       } catch (_) {}
     }
     // The app may still be wiring providers when a lock-screen action opens
@@ -311,6 +373,11 @@ class NotificationProvider extends ChangeNotifier {
   Future<void> _executeAction(String? actionId, String? payload) async {
     final medId = _medIdFromPayload(payload);
     final scheduleId = _scheduleIdFromPayload(payload);
+
+    if (actionId == 'snooze' && medId != null && scheduleId != null) {
+      await snoozeMedicationAlarm(medicationId: medId, scheduleId: scheduleId);
+      return;
+    }
 
     if (actionId == 'mark_taken') {
       if (medId != null && scheduleId != null) {
@@ -349,13 +416,32 @@ class NotificationProvider extends ChangeNotifier {
     }
   }
 
-  /// Pushes the ringing dose's alarm out by a few minutes without changing the
-  /// medication schedule. Only Android has a native snooze to defer to.
+  /// Pushes the ringing dose's alarm out by five minutes without changing the
+  /// medication schedule.
   Future<void> snoozeMedicationAlarm({
     required String medicationId,
     required String scheduleId,
   }) async {
     await _initialization;
+    if (Platform.isIOS) {
+      final medication = _medicationProvider?.getById(medicationId);
+      if (medication == null) return;
+      await dismissDoseAlarm(
+        medicationId: medicationId,
+        scheduleId: scheduleId,
+      );
+      final id = safeNotificationId(scheduleId) ^ 0x40000000;
+      await _scheduleAt(
+        id: id,
+        title: '${medication.name} due now',
+        body: medicationAlarmMessage(name: null, medicineName: medication.name),
+        at: DateTime.now().add(const Duration(minutes: 5)),
+        medicationId: medicationId,
+        scheduleId: scheduleId,
+        repeatsDaily: false,
+      );
+      return;
+    }
     if (!Platform.isAndroid) return;
     // Pass the same id the reminder was scheduled under, so the hash is not
     // reimplemented on the native side.
@@ -371,7 +457,33 @@ class NotificationProvider extends ChangeNotifier {
     required String scheduleId,
   }) async {
     await _initialization;
-    await _notificationsPlugin.cancel(safeNotificationId(scheduleId));
+    final id = safeNotificationId(scheduleId);
+    if (Platform.isIOS) {
+      await _notificationsPlugin.cancel(id ^ 0x40000000);
+      // Cancel clears the delivered alert and the repeating request together.
+      // Rebuild tomorrow's request so marking a dose never silences later days.
+      await _notificationsPlugin.cancel(id);
+      final medication = _medicationProvider?.getById(medicationId);
+      if (medication != null && !medication.isExpired) {
+        for (final schedule in medication.schedule) {
+          if (schedule.id != scheduleId) continue;
+          await scheduleMedicationNotification(
+            id: id,
+            title: '${medication.name} due now',
+            body: medicationAlarmMessage(
+              name: null,
+              medicineName: medication.name,
+            ),
+            time: schedule.time,
+            medicationId: medicationId,
+            scheduleId: scheduleId,
+          );
+          break;
+        }
+      }
+    } else {
+      await _notificationsPlugin.cancel(id);
+    }
     if (Platform.isAndroid) {
       await _nativeAlarmChannel.invokeMethod<void>('stopRinging');
     }
@@ -485,6 +597,17 @@ class NotificationProvider extends ChangeNotifier {
       });
       return;
     }
+    if (Platform.isIOS) {
+      final desired = alarms.map((alarm) => alarm['id'] as int).toSet();
+      for (final pending
+          in await _notificationsPlugin.pendingNotificationRequests()) {
+        if (pending.payload?.startsWith('med:') == true &&
+            !desired.contains(pending.id) &&
+            !desired.contains(pending.id ^ 0x40000000)) {
+          await _notificationsPlugin.cancel(pending.id);
+        }
+      }
+    }
     for (final alarm in alarms) {
       await scheduleMedicationNotification(
         id: alarm['id'] as int,
@@ -518,7 +641,8 @@ class NotificationProvider extends ChangeNotifier {
           presentAlert: true,
           presentBadge: true,
           presentSound: true,
-          interruptionLevel: InterruptionLevel.critical,
+          categoryIdentifier: 'medication_alarm',
+          interruptionLevel: InterruptionLevel.timeSensitive,
         ),
       ),
       androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,

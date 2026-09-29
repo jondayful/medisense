@@ -12,7 +12,7 @@ export const plans: Record<string, {
   },
   guardian_annual: {
     amount: 59900,
-    name: 'MediSense Guardian - 1 year',
+    name: 'MediSense Annual Cloud OCR - 1 year',
     tier: 'Guardian',
     durationDays: 365,
   },

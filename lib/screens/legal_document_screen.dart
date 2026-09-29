@@ -49,7 +49,7 @@ class LegalDocumentScreen extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              'Last updated: September 27, 2026',
+              'Last updated: September 29, 2026',
               style: AppTheme.textStyle(
                 fontSize: accessible ? 17 : 14,
                 color: bodyColor,
@@ -107,7 +107,7 @@ class LegalDocumentScreen extends StatelessWidget {
     ),
     (
       'Payments',
-      'If you choose a paid plan, the price and features shown at checkout apply to that purchase. PayMongo processes payment details. A plan becomes active only after the payment is verified. Payment and refund rights also depend on the checkout terms and applicable law.',
+      'If you choose a paid plan, it removes the app\'s daily limit on optional cloud OCR fallback for the stated period. It does not guarantee a successful cloud scan or faster recognition. PayMongo processes payment details. The app grants the plan period only after payment is verified; it does not automatically renew the plan. Payment and refund rights also depend on the checkout terms and applicable law.',
     ),
     (
       'Reminders and availability',
@@ -142,7 +142,7 @@ class LegalDocumentScreen extends StatelessWidget {
     ),
     (
       'Scanning and voice',
-      'The camera captures label images for text recognition. On-device ML Kit is used for local OCR; when cloud recognition is configured and used, the captured image is sent to Google Cloud Vision for text extraction. Offline Vosk processes voice commands on the device. Device text-to-speech speaks reminders. Review scan results before saving.',
+      'The camera captures label images for text recognition. On-device ML Kit is used for local OCR. Cloud scan assistance is off by default; if you enable it in Settings and a local scan is incomplete, the captured image may be sent directly to Google Cloud Vision for text extraction. You can withdraw this choice in Settings. Android voice commands require a downloaded speech model; iOS voice commands depend on available on-device language support. Device text-to-speech speaks reminders. Review scan results before saving.',
     ),
     (
       'Service providers and storage',
@@ -150,7 +150,7 @@ class LegalDocumentScreen extends StatelessWidget {
     ),
     (
       'Your controls and rights',
-      'You can change voice and accessibility settings, stop sharing by managing guardian pairings, and remove local app data by uninstalling. Uninstalling does not automatically erase synced cloud records. To request access, correction, deletion, or other applicable privacy rights, email support@matech.uno. We may verify your identity before acting on a request.',
+      'You can change voice and accessibility settings, turn off cloud scan assistance, and stop sharing by managing guardian pairings. Uninstalling removes the app from your device but does not automatically erase synced cloud records. To request access, correction, deletion, or other applicable privacy rights, use Privacy and data requests in Settings or email support@matech.uno. Do not include medicine details in an initial email. We may verify your identity before acting on a request.',
     ),
     (
       'Inactive account retention',

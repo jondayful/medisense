@@ -136,6 +136,7 @@ class _MediScanScreenState extends State<MediScanScreen>
   bool _cameraSuspended = false;
   bool _streamDetectsPrescription = false;
   DateTime? _lastCameraHintAt;
+  DateTime? _lastCameraHapticAt;
   int _cameraHintGeneration = 0;
   Future<void> _cameraHintSpeech = Future<void>.value();
   bool _cameraHintActive = false;
@@ -618,6 +619,13 @@ class _MediScanScreenState extends State<MediScanScreen>
   void _onCameraOcrHint(ScanHint hint) {
     if (!mounted || _screenDisposing || _cameraSuspended) return;
     if (_initialGreetingStarted && !_initialGreetingFinished) return;
+    final hapticNow = DateTime.now();
+    if (_lastCameraHapticAt == null ||
+        hapticNow.difference(_lastCameraHapticAt!) >=
+            const Duration(seconds: 3)) {
+      _lastCameraHapticAt = hapticNow;
+      unawaited(_vibrateCameraHint(hint));
+    }
     final appState = context.read<AppStateProvider>();
     if (!appState.voiceNavigationEnabled ||
         appState.ttsVerbosity == TtsVerbosity.essential) {
@@ -648,6 +656,23 @@ class _MediScanScreenState extends State<MediScanScreen>
           debugPrint('MediScan: camera framing speech failed: $error');
         })
         .whenComplete(() => _cameraHintActive = false);
+  }
+
+  /// One pulse means closer, two mean farther, and a firm pulse means hold.
+  /// The spoken cue names the action; the distinct pattern is supplemental.
+  Future<void> _vibrateCameraHint(ScanHint hint) async {
+    switch (hint) {
+      case ScanHint.noTextFound:
+        await HapticFeedback.selectionClick();
+      case ScanHint.moveCloser:
+        await HapticFeedback.lightImpact();
+      case ScanHint.moveFurther:
+        await HapticFeedback.lightImpact();
+        await Future<void>.delayed(const Duration(milliseconds: 170));
+        if (mounted && !_screenDisposing) await HapticFeedback.lightImpact();
+      case ScanHint.holdSteady:
+        await HapticFeedback.mediumImpact();
+    }
   }
 
   Future<void> _speakCameraHint(ScanHint hint, int generation) async {
@@ -1269,6 +1294,14 @@ class _MediScanScreenState extends State<MediScanScreen>
   /// tell the person to take a medicine.
   Future<void> _checkAgainstPlanOrContinue(MedicineLabelResult result) async {
     final tts = context.read<TtsProvider>();
+    // Every scan path reaches this point, including an exact saved-plan match.
+    // Expiration must be checked before any reassuring match response.
+    final expiry = _expiryInfo(result);
+    if (expiry?.isExpired == true) {
+      AccessibilityFeedback.error();
+      await _showExpiredMedicineWarning(expiry!, tts);
+      return;
+    }
     // OCR confidence is a safety input, not just UI decoration. A weak read
     // must never silently validate a medicine, but the elder gets a simple,
     // accessible confirmation question instead of a technical error.
@@ -1308,6 +1341,7 @@ class _MediScanScreenState extends State<MediScanScreen>
       scannedName: result.name,
       scannedStrength: result.dosage,
       activeMedications: medications,
+      at: DateTime.now(),
     );
     final medication = check.medication;
     switch (check.verdict) {
@@ -1341,6 +1375,44 @@ class _MediScanScreenState extends State<MediScanScreen>
             _statusMessage = 'Strength does not match the reviewed plan.';
           });
         }
+        return;
+      case PrescriptionScanVerdict.outsideScheduledTime:
+      case PrescriptionScanVerdict.alreadyRecorded:
+        AccessibilityFeedback.error();
+        final times = medication!.schedule
+            .map((schedule) => schedule.formattedTime)
+            .join(', ');
+        final alreadyRecorded =
+            check.verdict == PrescriptionScanVerdict.alreadyRecorded;
+        final message = alreadyRecorded
+            ? 'This dose was already marked taken today. Check your record before taking another dose.'
+            : 'The saved reminder times for ${medication.name} are $times. This scan is outside the one-hour reminder window. Check your prescription before taking it.';
+        await tts.speak(
+          message,
+          alreadyRecorded
+              ? 'Naitala nang nainom ang dose na ito ngayon. Suriin muna ang tala bago uminom muli.'
+              : 'Ang mga oras ng ${medication.name} ay $times. Wala sa isang oras na palugit ng paalala ang pag-scan na ito. Suriin muna ang reseta.',
+        );
+        if (!mounted) return;
+        await showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (dialogContext) => AlertDialog(
+            icon: const Icon(Icons.warning_amber_rounded),
+            title: Text(
+              alreadyRecorded
+                  ? 'Dose already recorded'
+                  : 'Check the scheduled time',
+            ),
+            content: Text(message),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('I understand'),
+              ),
+            ],
+          ),
+        );
         return;
       case PrescriptionScanVerdict.notInPlan:
         if (mounted) setState(() => _unrecognizedAlert = true);

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/accessibility_mode.dart';
 import '../models/voice_levels.dart';
+import '../services/cloud_ocr_consent.dart';
 
 enum TtsVerbosity { essential, standard, detailed }
 
@@ -34,6 +35,7 @@ class AppStateProvider extends ChangeNotifier {
   bool _voiceNavigationEnabled = false;
   bool _micTutorialShown = false;
   bool _wifiOnlyDownloads = false;
+  bool _cloudOcrConsent = false;
   double _ttsSpeed = 1.0;
   double _ttsPitch = 1.0;
   double _ttsVolume = 1.0;
@@ -56,6 +58,7 @@ class AppStateProvider extends ChangeNotifier {
   bool get voiceNavigationEnabled => _voiceNavigationEnabled;
   bool get micTutorialShown => _micTutorialShown;
   bool get wifiOnlyDownloads => _wifiOnlyDownloads;
+  bool get cloudOcrConsent => _cloudOcrConsent;
   double get ttsSpeed => _ttsSpeed;
   double get ttsPitch => _ttsPitch;
   double get ttsVolume => _ttsVolume;
@@ -110,6 +113,9 @@ class AppStateProvider extends ChangeNotifier {
     _onboardingName = _prefs!.getString('onboardingName');
     _micTutorialShown = _prefs!.getBool('micTutorialShown') ?? false;
     _wifiOnlyDownloads = _prefs!.getBool('wifiOnlyDownloads') ?? false;
+    // Older builds had a single switch without the current disclosure dialog.
+    // Require a fresh choice before any later cloud image transfer.
+    _cloudOcrConsent = CloudOcrConsent.isGranted(_prefs!);
     _lastRoute = _prefs!.getString('lastRoute');
     _authUserId = _prefs!.getString('authUserId');
     _authUserName = _prefs!.getString('authUserName');
@@ -134,6 +140,11 @@ class AppStateProvider extends ChangeNotifier {
     String tier, {
     String role = 'patient',
   }) async {
+    if (_authUserId != id) {
+      _cloudOcrConsent = false;
+      await _prefs?.setBool('cloudOcrConsent', false);
+      notifyListeners();
+    }
     _authUserId = id;
     _authUserName = name;
     _authUserEmail = email;
@@ -147,6 +158,9 @@ class AppStateProvider extends ChangeNotifier {
   }
 
   Future<void> clearAuthSession() async {
+    _cloudOcrConsent = false;
+    await _prefs?.setBool('cloudOcrConsent', false);
+    notifyListeners();
     _authUserId = null;
     _authUserName = null;
     _authUserEmail = null;
@@ -255,6 +269,12 @@ class AppStateProvider extends ChangeNotifier {
   void setWifiOnlyDownloads(bool value) {
     _wifiOnlyDownloads = value;
     _saveBool('wifiOnlyDownloads', value);
+    notifyListeners();
+  }
+
+  Future<void> setCloudOcrConsent(bool value) async {
+    await CloudOcrConsent.save(_prefs, value);
+    _cloudOcrConsent = value;
     notifyListeners();
   }
 

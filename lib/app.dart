@@ -195,7 +195,6 @@ class _MediSenseAppState extends State<MediSenseApp>
       notifProvider.setRouter(_router);
       notifProvider.setMedicationProvider(medProvider);
       notifProvider.setTtsProvider(ttsProvider);
-      await notifProvider.resolvePendingAction();
 
       // SharedPreferences can remember a local app login after Supabase has
       // no session. Do not restore that identity as an authenticated account.
@@ -249,6 +248,11 @@ class _MediSenseAppState extends State<MediSenseApp>
           tier: auth.tier,
         );
       }
+
+      // Notification actions refer to medication IDs in the restored user's
+      // local database. Attach that identity before resolving a cold-start tap.
+      medProvider.updateUserId(auth.userId);
+      await notifProvider.resolvePendingAction();
 
       if (!mounted) return;
       if (!_paymentDeepLinkReceived &&

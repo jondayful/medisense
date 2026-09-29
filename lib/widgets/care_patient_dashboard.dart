@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../models/care_overview.dart';
 import '../models/medication.dart';
 import '../services/supabase_sync_service.dart';
+import '../services/supabase_service.dart';
 import '../theme/app_theme.dart';
 
 /// Cloud-backed care snapshot. No guardian-side SQLite copy is involved.
@@ -27,7 +29,9 @@ class _CarePatientDashboardState extends State<CarePatientDashboard>
   late Future<CareOverview> _overview;
   String? _sendingSchedule;
   Timer? _refreshTimer;
+  RealtimeChannel? _changes;
   final Set<String> _seenTakenEvents = {};
+  final Set<String> _seenOverdueEvents = {};
   bool _hasLoaded = false;
 
   @override
@@ -37,6 +41,7 @@ class _CarePatientDashboardState extends State<CarePatientDashboard>
     _refresh();
     if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
       _startPolling();
+      _subscribe();
     }
   }
 
@@ -47,20 +52,61 @@ class _CarePatientDashboardState extends State<CarePatientDashboard>
     });
   }
 
+  void _subscribe() {
+    if (_changes != null || !SupabaseService.isConfigured) return;
+    final filter = PostgresChangeFilter(
+      type: PostgresChangeFilterType.eq,
+      column: 'patient_id',
+      value: widget.patientId,
+    );
+    _changes = SupabaseService.client
+        .channel('care:${widget.patientId}')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'medications',
+          filter: filter,
+          callback: (_) {
+            if (mounted) setState(_refresh);
+          },
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'adherence_logs',
+          filter: filter,
+          callback: (_) {
+            if (mounted) setState(_refresh);
+          },
+        )
+        .subscribe();
+  }
+
+  void _unsubscribe() {
+    final channel = _changes;
+    _changes = null;
+    if (channel != null) {
+      unawaited(SupabaseService.client.removeChannel(channel));
+    }
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && mounted) {
       setState(_refresh);
       _startPolling();
+      _subscribe();
     } else {
       _refreshTimer?.cancel();
       _refreshTimer = null;
+      _unsubscribe();
     }
   }
 
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    _unsubscribe();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -69,10 +115,13 @@ class _CarePatientDashboardState extends State<CarePatientDashboard>
   void didUpdateWidget(covariant CarePatientDashboard oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.patientId != widget.patientId) {
+      _unsubscribe();
       _sendingSchedule = null;
       _seenTakenEvents.clear();
+      _seenOverdueEvents.clear();
       _hasLoaded = false;
       _refresh();
+      _subscribe();
     }
   }
 
@@ -84,6 +133,38 @@ class _CarePatientDashboardState extends State<CarePatientDashboard>
           sync.fetchPatientLogs(widget.patientId),
         ]).then((result) {
           final overview = CareOverview.fromCloud(result[0], result[1]);
+          final now = DateTime.now();
+          final today = '${now.year}-${now.month}-${now.day}';
+          final overdue = overview.doses.where((dose) {
+            if (dose.status == 'taken') return false;
+            final scheduled = DateTime(
+              now.year,
+              now.month,
+              now.day,
+              dose.hour,
+              dose.minute,
+            );
+            return now.isAfter(scheduled.add(const Duration(minutes: 30)));
+          });
+          final newlyOverdue = overdue.where(
+            (dose) => !_seenOverdueEvents.contains('$today:${dose.scheduleId}'),
+          );
+          if (_hasLoaded && newlyOverdue.isNotEmpty && mounted) {
+            final dose = newlyOverdue.first;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    '${dose.medicationName} is overdue and has no recorded dose. Check with the patient.',
+                  ),
+                ),
+              );
+            });
+          }
+          _seenOverdueEvents.addAll(
+            overdue.map((dose) => '$today:${dose.scheduleId}'),
+          );
           final taken = overview.doses.where((dose) => dose.takenAt != null);
           final fresh = taken.where(
             (dose) => !_seenTakenEvents.contains(
@@ -214,7 +295,7 @@ class _CarePatientDashboardState extends State<CarePatientDashboard>
             ),
             const SizedBox(height: 3),
             Text(
-              'Changes appear after the patient device syncs.',
+              'Updates appear here after the patient device syncs. The app does not send missed-dose push alerts when this dashboard is closed.',
               style: AppTheme.textStyle(
                 fontSize: large ? 15 : 12,
                 color: muted,

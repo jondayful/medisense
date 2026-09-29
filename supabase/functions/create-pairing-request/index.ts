@@ -80,11 +80,12 @@ Deno.serve(async (request) => {
     .eq('email', patientEmail)
     .maybeSingle();
   if (patientError) {
-    console.error('Patient lookup failed:', patientError.message);
+    console.error('Patient lookup failed:', patientError.code);
     return Response.json({ error: 'Could not verify that account. Please try again.' }, { status: 500, headers: jsonHeaders });
   }
   if (!patient || patient.role !== 'patient') {
-    return Response.json({ error: 'No patient account was found for this email. Check the address and try again.' }, { status: 404, headers: jsonHeaders });
+    // Do not let a Guardian account enumerate patient email addresses.
+    return Response.json({ status: 'request_processed' }, { status: 200, headers: jsonHeaders });
   }
 
   const { data: existing, error: existingError } = await admin
@@ -97,11 +98,11 @@ Deno.serve(async (request) => {
     .limit(1)
     .maybeSingle();
   if (existingError) {
-    console.error('Pairing lookup failed:', existingError.code, existingError.message);
+    console.error('Pairing lookup failed:', existingError.code);
     return Response.json({ error: 'Could not check existing invitations. Please try again.' }, { status: 500, headers: jsonHeaders });
   }
   if (existing?.status === 'accepted') {
-    return Response.json({ error: 'This patient is already connected to your account.' }, { status: 409, headers: jsonHeaders });
+    return Response.json({ status: 'request_processed' }, { status: 200, headers: jsonHeaders });
   }
 
   const pairing = existing ?? {
@@ -140,13 +141,12 @@ Deno.serve(async (request) => {
   });
 
   if (!emailResponse.ok) {
-    const errorText = await emailResponse.text();
-    console.error('Resend rejected pairing invitation:', emailResponse.status, errorText);
+    console.error('Resend rejected pairing invitation:', emailResponse.status);
     if (!existing) {
       await admin.from('pairings').delete().eq('id', pairing.id).eq('status', 'pending');
     }
     return Response.json({ error: 'The invitation email could not be sent. Please try again later.' }, { status: 502, headers: jsonHeaders });
   }
 
-  return Response.json({ pairing }, { status: 200, headers: jsonHeaders });
+  return Response.json({ status: 'request_processed' }, { status: 200, headers: jsonHeaders });
 });

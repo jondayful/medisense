@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../providers/app_state_provider.dart';
@@ -150,13 +151,19 @@ class _VisionVoiceFabState extends State<VisionVoiceFab>
     } catch (error, stackTrace) {
       debugPrint('Voice microphone start failed: $error\n$stackTrace');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Microphone could not start. Check your permissions and try again.',
-            ),
-          ),
-        );
+        final message =
+            error is PlatformException &&
+                {
+                  'LANGUAGE_UNAVAILABLE',
+                  'SPEECH_PERMISSION',
+                  'MICROPHONE_PERMISSION',
+                }.contains(error.code)
+            ? error.message ??
+                  'Speech recognition is unavailable on this device.'
+            : 'Microphone could not start. Check your permissions and try again.';
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(message)));
       }
     } finally {
       if (mounted) setState(() => _starting = false);

@@ -15,6 +15,7 @@ import '../services/scan_speech_parser.dart';
 import '../services/vosk_command_dispatcher.dart';
 import '../services/vosk_command_listener.dart';
 import '../services/vosk_model_store.dart';
+import '../services/voice_medication_input.dart';
 import 'app_state_provider.dart';
 import 'medication_provider.dart';
 import 'tts_provider.dart';
@@ -92,6 +93,19 @@ final class _MovePrompt extends _VoicePrompt {
   const _MovePrompt({required this.medication, required this.time});
   final Medication medication;
   final TimeOfDay time;
+}
+
+enum _AddStage { dose, form, expiry, frequency, time, confirm }
+
+final class _AddPrompt extends _VoicePrompt {
+  _AddPrompt(this.name);
+  final String name;
+  _AddStage stage = _AddStage.dose;
+  String? dose;
+  String? form;
+  DateTime? expiry;
+  String? frequency;
+  TimeOfDay? time;
 }
 
 /// Outcome of matching a spoken medicine name against the schedule.
@@ -258,6 +272,7 @@ class VoiceNavigationProvider extends ChangeNotifier
     }
     if (_listener != null) return;
     final listener = VoskCommandListener(
+      iosLocale: () => _appState?.isFilipino == true ? 'fil-PH' : 'en-PH',
       onPartial: (text) {
         _partialHeard = text;
         notifyListeners();
@@ -342,8 +357,12 @@ class VoiceNavigationProvider extends ChangeNotifier
       // Finish the cue before AudioRecord starts so Vosk cannot recognize the
       // app's own voice. speakCue preserves the user's repeat-last message.
       await _tts?.speakCue(
-        'I am listening. What can I help with?',
-        'Nakikinig na. Ano iyon?',
+        _prompt is _AddPrompt
+            ? 'I am listening for the medicine detail.'
+            : 'I am listening. What can I help with?',
+        _prompt is _AddPrompt
+            ? 'Nakikinig ako sa detalye ng gamot.'
+            : 'Nakikinig na. Ano iyon?',
       );
       // Some Android TTS engines report completion just before releasing
       // audio focus. This keeps the first spoken syllable from being clipped.
@@ -352,7 +371,13 @@ class VoiceNavigationProvider extends ChangeNotifier
       _listening = true;
       _processing = false;
       notifyListeners();
-      final recognized = await listener.listenForCommand(baseTimeout: duration);
+      final awaitingAdd = _prompt is _AddPrompt;
+      final answer = awaitingAdd
+          ? await listener.listenForTranscript(baseTimeout: duration)
+          : null;
+      final recognized = awaitingAdd
+          ? answer != null && await _resolvePendingFromSpeech(answer)
+          : await listener.listenForCommand(baseTimeout: duration);
       if (!recognized && !_suppressNoMatchFeedback && _canListen) {
         final heardSomething = _lastHeard?.trim().isNotEmpty == true;
         await _tts?.speak(
@@ -582,6 +607,11 @@ class VoiceNavigationProvider extends ChangeNotifier
   Future<bool> _resolvePendingFromSpeech(String text) async {
     final prompt = _prompt;
     if (prompt == null) return false;
+
+    if (prompt is _AddPrompt) {
+      await _resolveAddAnswer(prompt, text);
+      return true;
+    }
 
     if (prompt is _TakePrompt) {
       if (ScanSpeechParser.isNo(text)) {
@@ -1136,7 +1166,7 @@ class VoiceNavigationProvider extends ChangeNotifier
     );
   }
 
-  /// Proposes a new medication from a spoken name, frequency and start time.
+  /// Captures each safety-critical field before asking for spoken confirmation.
   Future<void> _prepareAdd(VoskCommand command) async {
     final name = command.medicationName;
     if (name == null || name.trim().isEmpty) {
@@ -1146,11 +1176,195 @@ class VoiceNavigationProvider extends ChangeNotifier
       );
       return;
     }
-    _prompt = null;
+    if (_medications?.isViewingPatient == true) {
+      await _tts?.speak(
+        'A caregiver view cannot add medicine to the patient schedule.',
+        'Hindi maaaring magdagdag ng gamot mula sa caregiver view.',
+      );
+      return;
+    }
+    _prompt = _AddPrompt(name.trim());
     notifyListeners();
     await _tts?.speak(
-      'I heard $name. To add it safely, enter its dose, form, expiry date, frequency, and time in Add Medicine.',
-      'Narinig ko ang $name. Para maidagdag ito nang tama, ilagay ang dose, anyo, expiry, dalas, at oras sa Add Medicine.',
+      'Adding $name. Say the dose with its unit, for example 500 milligrams. Say cancel at any time.',
+      'Idinadagdag ang $name. Sabihin ang dose at unit, halimbawa 500 milligrams. Sabihin cancel para huminto.',
+    );
+  }
+
+  Future<void> _resolveAddAnswer(_AddPrompt prompt, String text) async {
+    final answer = text.trim().toLowerCase();
+    if (RegExp(r'\b(cancel|stop|kanselahin|hinto)\b').hasMatch(answer)) {
+      _prompt = null;
+      notifyListeners();
+      await _tts?.speak(
+        'Medicine entry cancelled.',
+        'Kinansela ang pagdagdag ng gamot.',
+      );
+      return;
+    }
+    switch (prompt.stage) {
+      case _AddStage.dose:
+        final dose = VoiceMedicationInput.dose(answer);
+        if (dose == null) {
+          await _tts?.speak(
+            'I need a number and unit. Say, for example, 500 milligrams or 5 milliliters.',
+            'Kailangan ang bilang at unit. Halimbawa, 500 milligrams o 5 milliliters.',
+          );
+          return;
+        }
+        prompt.dose = dose;
+        prompt.stage = _AddStage.form;
+        await _tts?.speak(
+          'What form is ${prompt.name}? Say tablet, capsule, syrup, drops, or inhaler.',
+          'Anong anyo ng gamot? Sabihin tablet, capsule, syrup, drops, o inhaler.',
+        );
+      case _AddStage.form:
+        final forms = <String, String>{
+          'tablet': 'Tablet',
+          'tableta': 'Tablet',
+          'capsule': 'Capsule',
+          'kapsula': 'Capsule',
+          'syrup': 'Syrup',
+          'sirup': 'Syrup',
+          'drops': 'Drops',
+          'patak': 'Drops',
+          'inhaler': 'Inhaler',
+          'cream': 'Cream',
+        };
+        String? form;
+        for (final entry in forms.entries) {
+          if (RegExp('\\b${entry.key}\\b').hasMatch(answer)) {
+            form = entry.value;
+            break;
+          }
+        }
+        if (form == null) {
+          await _tts?.speak(
+            'Say the medicine form, such as tablet or syrup.',
+            'Sabihin ang anyo ng gamot, gaya ng tablet o syrup.',
+          );
+          return;
+        }
+        prompt.form = form;
+        prompt.stage = _AddStage.expiry;
+        await _tts?.speak(
+          'Say the expiry as month slash year, for example 03 slash 2027. Say unknown if it is not available.',
+          'Sabihin ang expiry na buwan at taon, halimbawa 03 slash 2027. Sabihin unknown kung wala.',
+        );
+      case _AddStage.expiry:
+        if (RegExp(r'\b(unknown|none|wala|hindi alam)\b').hasMatch(answer)) {
+          prompt.expiry = null;
+        } else {
+          final expiry = VoiceMedicationInput.expiry(answer);
+          if (expiry == null || expiry.isBefore(DateTime.now())) {
+            await _tts?.speak(
+              'I could not confirm a future expiry. Say month and year, or say unknown.',
+              'Hindi matukoy ang expiry. Sabihin ang buwan at taon, o unknown.',
+            );
+            return;
+          }
+          prompt.expiry = expiry;
+        }
+        prompt.stage = _AddStage.frequency;
+        await _tts?.speak(
+          'How often? Say once a day, twice a day, or as needed.',
+          'Gaano kadalas? Sabihin once a day, twice a day, o as needed.',
+        );
+      case _AddStage.frequency:
+        final frequency = ScanSpeechParser.frequencyFromSpeech(answer);
+        if (frequency == null) {
+          await _tts?.speak(
+            'I did not understand the frequency. Say once a day, twice a day, or as needed.',
+            'Hindi malinaw ang dalas. Sabihin once a day, twice a day, o as needed.',
+          );
+          return;
+        }
+        prompt.frequency = frequency;
+        if (frequency == 'As needed') {
+          prompt.stage = _AddStage.confirm;
+          await _readAddSummary(prompt);
+        } else {
+          prompt.stage = _AddStage.time;
+          await _tts?.speak(
+            'What time is the first dose? Include A M or P M, for example 8 A M.',
+            'Anong oras ang unang dose? Sabihin A M o P M, halimbawa 8 A M.',
+          );
+        }
+      case _AddStage.time:
+        final time = ScanSpeechParser.timeFromSpeech(answer);
+        if (time == null ||
+            !RegExp(
+              r'\b(am|pm|a m|p m|umaga|gabi|hapon|tanghali)\b',
+            ).hasMatch(answer)) {
+          await _tts?.speak(
+            'Say a time with A M or P M, for example 8 A M.',
+            'Sabihin ang oras na may A M o P M, halimbawa 8 A M.',
+          );
+          return;
+        }
+        prompt.time = time;
+        prompt.stage = _AddStage.confirm;
+        await _readAddSummary(prompt);
+      case _AddStage.confirm:
+        if (ScanSpeechParser.isNo(answer)) {
+          _prompt = null;
+          notifyListeners();
+          await _tts?.speak(
+            'Medicine entry cancelled. Start again to correct it.',
+            'Kinansela ang pagdagdag. Simulan muli para itama.',
+          );
+          return;
+        }
+        if (!ScanSpeechParser.isYes(answer)) {
+          await _tts?.speak(
+            'Say yes to save, or no to cancel.',
+            'Sabihin yes para i-save, o no para kanselahin.',
+          );
+          return;
+        }
+        final id = DateTime.now().microsecondsSinceEpoch.toString();
+        final medication = Medication(
+          id: id,
+          name: prompt.name,
+          dosage: prompt.dose!,
+          form: prompt.form!,
+          expirationDate: prompt.expiry,
+          frequency: prompt.frequency!,
+          schedule: prompt.time == null
+              ? []
+              : ScheduleTime.buildSchedule(
+                  medId: id,
+                  start: prompt.time!,
+                  frequency: prompt.frequency!,
+                ),
+        );
+        _prompt = null;
+        notifyListeners();
+        try {
+          await _medications!.addMedication(medication);
+          await _tts?.speak(
+            '${prompt.name} was saved. Check the schedule for accuracy.',
+            'Nai-save ang ${prompt.name}. Suriin ang iskedyul.',
+          );
+        } on Object {
+          await _tts?.speak(
+            'I could not save this medicine. Please try again.',
+            'Hindi nai-save ang gamot. Pakisubukan muli.',
+          );
+        }
+    }
+  }
+
+  Future<void> _readAddSummary(_AddPrompt prompt) async {
+    final expiry = prompt.expiry == null
+        ? 'expiry unknown'
+        : 'expires ${MedicineExpiryParser.formatStored(prompt.expiry!)}';
+    final time = prompt.time == null
+        ? ''
+        : ', first dose at ${ScheduleTime.formatTime(prompt.time!)}';
+    await _tts?.speak(
+      'Confirm: ${prompt.name}, ${prompt.dose}, ${prompt.form}, $expiry, ${prompt.frequency}$time. Say yes to save or no to cancel.',
+      'Kumpirmahin: ${prompt.name}, ${prompt.dose}, ${prompt.form}, $expiry, ${prompt.frequency}$time. Sabihin yes para i-save o no para kanselahin.',
     );
   }
 

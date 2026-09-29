@@ -18,8 +18,9 @@ enum DoseStatusChangeResult {
   unavailable,
 }
 
-class MedicationProvider extends ChangeNotifier {
+class MedicationProvider extends ChangeNotifier with WidgetsBindingObserver {
   MedicationProvider() {
+    WidgetsBinding.instance.addObserver(this);
     _connectivitySubscription = Connectivity().onConnectivityChanged.listen(
       (results) {
         if (results.any((result) => result != ConnectivityResult.none)) {
@@ -47,8 +48,14 @@ class MedicationProvider extends ChangeNotifier {
   Future<void> _doseStatusQueue = Future<void>.value();
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   Future<void>? _activeOutboxDrain;
+  Timer? _outboxRetryTimer;
   bool _disposed = false;
   static const Duration _cacheTTL = Duration(seconds: 30);
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) unawaited(_drainSyncOutbox());
+  }
 
   void updateNotificationProvider(NotificationProvider? provider) {
     final changed = !identical(_notificationProvider, provider);
@@ -494,6 +501,7 @@ class MedicationProvider extends ChangeNotifier {
           )
           .toList(),
       replaceSchedules: false,
+      syncUserId: SupabaseSyncService.nullableUuid(_userId),
     );
     for (var s in medication.schedule) {
       if (_notificationProvider != null && _notificationsEnabled) {
@@ -510,7 +518,7 @@ class MedicationProvider extends ChangeNotifier {
     }
     invalidateCache();
     await loadMedications(forceRefresh: true);
-    await _queueMedicationSync(medication.id, medMap);
+    unawaited(_drainSyncOutbox());
   }
 
   Future<void> editMedication(Medication medication) async {
@@ -546,6 +554,7 @@ class MedicationProvider extends ChangeNotifier {
           )
           .toList(),
       replaceSchedules: true,
+      syncUserId: SupabaseSyncService.nullableUuid(_userId),
     );
     for (var s in medication.schedule) {
       if (_notificationProvider != null && _notificationsEnabled) {
@@ -562,7 +571,7 @@ class MedicationProvider extends ChangeNotifier {
     }
     invalidateCache();
     await loadMedications(forceRefresh: true);
-    await _queueMedicationSync(medication.id, medMap);
+    unawaited(_drainSyncOutbox());
   }
 
   /// Moves one recurring dose while preserving its schedule ID and adherence
@@ -590,50 +599,57 @@ class MedicationProvider extends ChangeNotifier {
       time: time,
       taken: oldSchedule.taken,
     );
+    final syncUserId = SupabaseSyncService.nullableUuid(_userId);
+    final syncPayload = syncUserId == null
+        ? null
+        : <String, dynamic>{
+            'id': medication.id,
+            'name': medication.name,
+            'dosage': medication.dosage,
+            'form': medication.form,
+            'color_hex': medication.color.toARGB32().toRadixString(16),
+            'expiration_date': medication.expirationDate?.toIso8601String(),
+            'frequency': medication.frequency,
+            'quantity_dispensed': medication.quantityDispensed,
+            'units_per_dose': medication.unitsPerDose,
+            'prescription_start_date': medication.prescriptionStartDate
+                ?.toIso8601String(),
+            'prescription_reviewed': medication.prescriptionReviewed ? 1 : 0,
+            'user_id': _userId,
+            'schedules': [
+              for (final s in medication.schedule)
+                {
+                  'id': s.id,
+                  'label': s.id == scheduleId ? updatedSchedule.label : s.label,
+                  'hour': s.id == scheduleId ? time.hour : s.time.hour,
+                  'minute': s.id == scheduleId ? time.minute : s.time.minute,
+                },
+            ],
+          };
     await _db.updateScheduleTime(
       scheduleId,
       label: updatedSchedule.label,
       hour: time.hour,
       minute: time.minute,
+      syncUserId: syncUserId,
+      syncPayload: syncPayload,
     );
     medication.schedule[scheduleIndex] = updatedSchedule;
     _lastFetchTime = DateTime.now();
     notifyListeners();
     await syncMedicationAlarms();
-    await _queueMedicationSync(medication.id, {
-      'id': medication.id,
-      'name': medication.name,
-      'dosage': medication.dosage,
-      'form': medication.form,
-      'color_hex': medication.color.toARGB32().toRadixString(16),
-      'expiration_date': medication.expirationDate?.toIso8601String(),
-      'frequency': medication.frequency,
-      'quantity_dispensed': medication.quantityDispensed,
-      'units_per_dose': medication.unitsPerDose,
-      'prescription_start_date': medication.prescriptionStartDate
-          ?.toIso8601String(),
-      'prescription_reviewed': medication.prescriptionReviewed ? 1 : 0,
-      'user_id': _userId,
-    });
+    if (syncUserId != null) unawaited(_drainSyncOutbox());
     return true;
   }
 
   Future<void> removeMedication(String id) async {
     if (_viewingPatient) return;
     await _cancelExistingNotifications(id);
-    await _db.deleteMedication(id, _userId);
+    final userUuid = SupabaseSyncService.nullableUuid(_userId);
+    await _db.deleteMedication(id, _userId, syncUserId: userUuid);
     invalidateCache();
     await loadMedications(forceRefresh: true);
-    final userUuid = SupabaseSyncService.nullableUuid(_userId);
-    if (userUuid != null) {
-      await _db.enqueueSyncOperation(
-        id: 'medication:$userUuid:$id',
-        operation: 'deleteMedication',
-        userId: userUuid,
-        payload: {'medicationId': id},
-      );
-      unawaited(_drainSyncOutbox());
-    }
+    if (userUuid != null) unawaited(_drainSyncOutbox());
   }
 
   List<Medication> get morningMeds => _medications
@@ -684,33 +700,6 @@ class MedicationProvider extends ChangeNotifier {
   int get totalTaken =>
       _medications.fold<int>(0, (sum, m) => sum + m.takenDoses);
 
-  Future<void> _queueMedicationSync(
-    String medId,
-    Map<String, dynamic> medMap,
-  ) async {
-    final userUuid = SupabaseSyncService.nullableUuid(_userId);
-    if (userUuid == null) return;
-    final schedules = _medications
-        .where((m) => m.id == medId)
-        .expand((m) => m.schedule)
-        .map(
-          (s) => {
-            'id': s.id,
-            'label': s.label,
-            'hour': s.time.hour,
-            'minute': s.time.minute,
-          },
-        )
-        .toList();
-    await _db.enqueueSyncOperation(
-      id: 'medication:$userUuid:$medId',
-      operation: 'medication',
-      userId: userUuid,
-      payload: {...medMap, 'schedules': schedules},
-    );
-    unawaited(_drainSyncOutbox());
-  }
-
   Future<void> _drainSyncOutbox() {
     if (_disposed || _viewingPatient) return Future<void>.value();
     final active = _activeOutboxDrain;
@@ -726,7 +715,7 @@ class MedicationProvider extends ChangeNotifier {
       return;
     }
     try {
-      final operations = await _db.pendingSyncOperations();
+      final operations = await _db.pendingSyncOperations(userId: _userId);
       for (final operation in operations) {
         if (_disposed || operation['user_id'] != _userId) continue;
         final id = operation['id'] as String;
@@ -780,12 +769,36 @@ class MedicationProvider extends ChangeNotifier {
       }
     } catch (error) {
       debugPrint('Could not drain sync outbox: $error');
+    } finally {
+      await _scheduleOutboxRetry();
     }
+  }
+
+  Future<void> _scheduleOutboxRetry() async {
+    _outboxRetryTimer?.cancel();
+    _outboxRetryTimer = null;
+    if (_disposed ||
+        _viewingPatient ||
+        !_sync.isInitialized ||
+        SupabaseSyncService.nullableUuid(_userId) == null) {
+      return;
+    }
+    final next = await _db.nextSyncRetryAt(_userId);
+    if (next == null || _disposed) return;
+    final delayMs = (next - DateTime.now().millisecondsSinceEpoch).clamp(
+      250,
+      3600000,
+    );
+    _outboxRetryTimer = Timer(Duration(milliseconds: delayMs), () {
+      unawaited(_drainSyncOutbox());
+    });
   }
 
   @override
   void dispose() {
     _disposed = true;
+    _outboxRetryTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     unawaited(_connectivitySubscription?.cancel());
     super.dispose();
   }
