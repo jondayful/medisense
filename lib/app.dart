@@ -245,12 +245,20 @@ class _MediSenseAppState extends State<MediSenseApp>
             role: auth.role.name,
           );
         }
-        await syncService.uploadUserProfile(
-          userId: auth.userId,
-          email: auth.userEmail,
-          name: auth.userName,
-          role: auth.role,
-          tier: auth.tier,
+        // The profile write is maintenance work; route restoration and local
+        // reminders should not wait for another network round trip.
+        unawaited(
+          syncService
+              .uploadUserProfile(
+                userId: auth.userId,
+                email: auth.userEmail,
+                name: auth.userName,
+                role: auth.role,
+                tier: auth.tier,
+              )
+              .catchError((Object error, StackTrace stack) {
+                debugPrint('Could not refresh profile on startup: $error');
+              }),
         );
       }
 
@@ -318,13 +326,21 @@ class _MediSenseAppState extends State<MediSenseApp>
 
   Future<void> _setupDeepLinks() async {
     _appLinks = AppLinks();
-
-    final initialLink = await _appLinks.getInitialLink();
-    if (initialLink != null) {
-      _handleDeepLink(initialLink);
+    // The mobile stream also includes the launch link. Subscribe first, then
+    // bound the platform's initial-link lookup so session restore can proceed.
+    _deepLinkSubscription = _appLinks.uriLinkStream.listen(
+      _handleDeepLink,
+      onError: (Object error, StackTrace stack) =>
+          debugPrint('Deep link listener failed: $error'),
+    );
+    try {
+      final initialLink = await _appLinks.getInitialLink().timeout(
+        const Duration(seconds: 3),
+      );
+      if (initialLink != null) _handleDeepLink(initialLink);
+    } catch (error) {
+      debugPrint('Initial deep link unavailable: $error');
     }
-
-    _deepLinkSubscription = _appLinks.uriLinkStream.listen(_handleDeepLink);
   }
 
   void _handleDeepLink(Uri uri) {

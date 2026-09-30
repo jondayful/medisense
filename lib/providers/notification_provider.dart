@@ -161,9 +161,9 @@ class NotificationProvider extends ChangeNotifier {
 
     final DarwinInitializationSettings initializationSettingsIOS =
         DarwinInitializationSettings(
-          requestAlertPermission: true,
-          requestBadgePermission: true,
-          requestSoundPermission: true,
+          requestAlertPermission: false,
+          requestBadgePermission: false,
+          requestSoundPermission: false,
           notificationCategories: [
             DarwinNotificationCategory(
               'medication_alarm',
