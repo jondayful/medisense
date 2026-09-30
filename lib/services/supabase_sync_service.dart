@@ -162,12 +162,7 @@ class SupabaseSyncService {
         final message = data is Map ? data['error']?.toString() : null;
         throw StateError(message ?? 'Could not send the invitation email.');
       }
-      if (data is! Map || data['status'] != 'request_processed') {
-        throw StateError(
-          'The invitation service returned an invalid response.',
-        );
-      }
-      return Map<String, dynamic>.from(data);
+      return parsePairingInvitationResponse(data);
     } on FunctionException catch (error) {
       debugPrint(
         'Pairing invitation function failed (${error.status}): ${error.details}',
@@ -176,6 +171,23 @@ class SupabaseSyncService {
       final message = details is Map ? details['error']?.toString() : null;
       throw StateError(message ?? 'Could not send the invitation email.');
     }
+  }
+
+  /// Older deployed functions return a pairing row after sending the email.
+  /// Keep that response private and expose the same result as newer functions.
+  @visibleForTesting
+  static Map<String, dynamic> parsePairingInvitationResponse(dynamic data) {
+    if (data is Map && data['status'] == 'request_processed') {
+      return {'status': 'request_processed'};
+    }
+    final pairing = data is Map ? data['pairing'] : null;
+    if (pairing is Map &&
+        pairing['id'] is String &&
+        (pairing['id'] as String).isNotEmpty &&
+        pairing['status'] == 'pending') {
+      return {'status': 'request_processed'};
+    }
+    throw StateError('The invitation service returned an invalid response.');
   }
 
   Future<void> updatePairingStatus(
