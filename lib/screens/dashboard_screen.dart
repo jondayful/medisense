@@ -215,10 +215,7 @@ class _DashboardScreenState extends State<DashboardScreen>
       ..showSnackBar(
         SnackBar(
           content: Text('${next.med.name} marked as taken'),
-          behavior: SnackBarBehavior.floating,
           duration: const Duration(seconds: 2),
-          margin: const EdgeInsets.fromLTRB(20, 0, 20, 112),
-          shape: const StadiumBorder(),
         ),
       );
   }

@@ -295,7 +295,7 @@ class _CarePatientDashboardState extends State<CarePatientDashboard>
             ),
             const SizedBox(height: 3),
             Text(
-              'Updates appear here after the patient device syncs. The app does not send missed-dose push alerts when this dashboard is closed.',
+              'Updates appear after the patient device syncs. Push alerts for unrecorded doses require notification permission and cloud push setup.',
               style: AppTheme.textStyle(
                 fontSize: large ? 15 : 12,
                 color: muted,

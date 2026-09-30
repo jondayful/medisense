@@ -67,16 +67,10 @@ class _GuardianHomeCardState extends State<GuardianHomeCard> {
     if (pairings.isEmpty) return const _GuardianHomeSummary();
 
     final pairing = pairings.first;
-    final profile = await SupabaseSyncService().getUserProfile(
+    final profileName = await SupabaseSyncService().getPairedPatientName(
       pairing.patientId,
     );
-    final rawName = profile?['name']?.toString().trim();
-    final name = rawName == null || rawName.isEmpty
-        ? pairing.patientEmail
-              .split('@')
-              .first
-              .replaceAll(RegExp(r'[._-]+'), ' ')
-        : rawName;
+    final name = profileName ?? 'your patient';
 
     var remoteMeds = <Map<String, dynamic>>[];
     var remoteLogs = <Map<String, dynamic>>[];

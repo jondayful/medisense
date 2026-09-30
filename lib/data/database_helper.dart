@@ -648,6 +648,7 @@ class DatabaseHelper {
         m.units_per_dose AS med_units_per_dose,
         m.prescription_start_date AS med_prescription_start_date,
         m.prescription_reviewed AS med_prescription_reviewed,
+        m.user_id AS med_user_id,
         s.id AS sched_id,
         s.label AS sched_label,
         s.hour AS sched_hour,
@@ -917,6 +918,16 @@ class DatabaseHelper {
     final db = await database;
     final rows = await db.rawQuery(
       'SELECT COUNT(*) AS total FROM sync_outbox WHERE user_id = ?',
+      [userId],
+    );
+    return (rows.single['total'] as int?) ?? 0;
+  }
+
+  Future<int> queuedMedicationSyncOperationCount(String userId) async {
+    final db = await database;
+    final rows = await db.rawQuery(
+      "SELECT COUNT(*) AS total FROM sync_outbox WHERE user_id = ? "
+      "AND operation IN ('medication', 'deleteMedication')",
       [userId],
     );
     return (rows.single['total'] as int?) ?? 0;

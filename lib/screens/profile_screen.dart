@@ -933,14 +933,18 @@ class _SubscriptionSheetState extends State<_SubscriptionSheet> {
                 (f) => Padding(
                   padding: const EdgeInsets.only(bottom: 9),
                   child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Icon(Icons.check_circle_rounded, size: 20, color: ink),
                       const SizedBox(width: 10),
-                      Text(
-                        f,
-                        style: AppTheme.textStyle(
-                          fontSize: isLarge ? 18 : 15,
-                          fontWeight: FontWeight.w600,
+                      Expanded(
+                        child: Text(
+                          f,
+                          softWrap: true,
+                          style: AppTheme.textStyle(
+                            fontSize: isLarge ? 18 : 15,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
                     ],
@@ -966,6 +970,8 @@ class _SubscriptionSheetState extends State<_SubscriptionSheet> {
                   loading
                       ? 'Opening secure checkout…'
                       : 'Continue with ${selected.title}',
+                  textAlign: TextAlign.center,
+                  softWrap: true,
                 ),
               ),
               const SizedBox(height: 10),
@@ -995,87 +1001,89 @@ class _Plan extends StatelessWidget {
     final isLarge = _usesLargeText(context);
     final ink = AppTheme.actionColor(context);
     final muted = AppTheme.secondaryTextColor(context);
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(16),
-      child: Container(
-        padding: EdgeInsets.all(isLarge ? 18 : 15),
-        decoration: BoxDecoration(
-          color: selected ? ink.withValues(alpha: .09) : Colors.transparent,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: selected ? ink : AppTheme.timber,
-            width: selected ? 2 : 1,
-          ),
-        ),
-        child: Row(
-          children: [
-            Icon(
-              selected
-                  ? Icons.radio_button_checked_rounded
-                  : Icons.radio_button_off_rounded,
-              color: ink,
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: '${plan.title}, ${plan.price}${best ? ', best value' : ''}',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: EdgeInsets.all(isLarge ? 18 : 15),
+          decoration: BoxDecoration(
+            color: selected ? ink.withValues(alpha: .09) : Colors.transparent,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: selected ? ink : AppTheme.borderColor(context),
+              width: selected ? 2 : 1,
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Flexible(
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                selected
+                    ? Icons.radio_button_checked_rounded
+                    : Icons.radio_button_off_rounded,
+                color: ink,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      plan.title,
+                      softWrap: true,
+                      style: AppTheme.textStyle(
+                        fontSize: isLarge ? 20 : 16,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    if (best) ...[
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: AppTheme.foil.withValues(alpha: .18),
+                          borderRadius: BorderRadius.circular(99),
+                        ),
                         child: Text(
-                          plan.title,
+                          'BEST VALUE',
                           style: AppTheme.textStyle(
-                            fontSize: isLarge ? 20 : 16,
+                            fontSize: isLarge ? 13 : 11,
                             fontWeight: FontWeight.w800,
+                            color: AppTheme.primaryTextColor(context),
                           ),
                         ),
                       ),
-                      if (best)
-                        Container(
-                          margin: const EdgeInsets.only(left: 8),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 7,
-                            vertical: 3,
-                          ),
-                          decoration: BoxDecoration(
-                            color: AppTheme.foil.withValues(alpha: .18),
-                            borderRadius: BorderRadius.circular(99),
-                          ),
-                          child: Text(
-                            'BEST VALUE',
-                            style: AppTheme.textStyle(
-                              fontSize: isLarge ? 12 : 10,
-                              fontWeight: FontWeight.w900,
-                              color: AppTheme.foil,
-                            ),
-                          ),
-                        ),
                     ],
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    plan.description,
-                    style: AppTheme.textStyle(
-                      fontSize: isLarge ? 16 : 12,
-                      color: muted,
+                    const SizedBox(height: 6),
+                    Text(
+                      plan.description,
+                      softWrap: true,
+                      style: AppTheme.textStyle(
+                        fontSize: isLarge ? 16 : 12,
+                        color: muted,
+                      ),
                     ),
-                  ),
-                ],
+                    const SizedBox(height: 10),
+                    Text(
+                      plan.price,
+                      style: AppTheme.textStyle(
+                        fontSize: isLarge ? 18 : 15,
+                        fontWeight: FontWeight.w800,
+                        color: ink,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              plan.price,
-              textAlign: TextAlign.end,
-              style: AppTheme.textStyle(
-                fontSize: isLarge ? 17 : 14,
-                fontWeight: FontWeight.w800,
-                color: ink,
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

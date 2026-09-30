@@ -29,6 +29,7 @@ import 'providers/notification_provider.dart';
 import 'providers/medication_provider.dart';
 import 'services/supabase_sync_service.dart';
 import 'services/supabase_service.dart';
+import 'services/guardian_push_service.dart';
 
 class MediSenseApp extends StatefulWidget {
   const MediSenseApp({super.key});
@@ -55,6 +56,7 @@ class _MediSenseAppState extends State<MediSenseApp>
   String? _careReminderPatientId;
   bool _careReminderChecking = false;
   bool _careReminderForeground = true;
+  final GuardianPushService _guardianPush = GuardianPushService();
   final List<String> _routeHistory = [];
 
   @override
@@ -173,6 +175,9 @@ class _MediSenseAppState extends State<MediSenseApp>
     );
 
     _router.routerDelegate.addListener(_onRouteChanged);
+    _guardianPush.onOpenGuardian = () {
+      if (mounted) _router.go('/guardian');
+    };
     _deepLinkReady = _setupDeepLinks();
     unawaited(_deepLinkReady);
 
@@ -251,7 +256,7 @@ class _MediSenseAppState extends State<MediSenseApp>
 
       // Notification actions refer to medication IDs in the restored user's
       // local database. Attach that identity before resolving a cold-start tap.
-      medProvider.updateUserId(auth.userId);
+      medProvider.updateUserId(auth.userId, isPatientAccount: auth.isPatient);
       await notifProvider.resolvePendingAction();
 
       if (!mounted) return;
@@ -281,14 +286,19 @@ class _MediSenseAppState extends State<MediSenseApp>
     if (_appStateProvider == nextAppState) return;
 
     _appStateProvider?.removeListener(_syncVoiceNavigationMode);
+    _appStateProvider?.removeListener(_syncCloudNotifications);
     _appStateProvider = nextAppState;
     _appStateProvider?.addListener(_syncVoiceNavigationMode);
+    _appStateProvider?.addListener(_syncCloudNotifications);
     final nextAuth = context.read<AuthProvider>();
     if (_authProvider != nextAuth) {
       _authProvider?.removeListener(_syncCareReminderPolling);
+      _authProvider?.removeListener(_syncCloudNotifications);
       _authProvider = nextAuth;
       _authProvider?.addListener(_syncCareReminderPolling);
+      _authProvider?.addListener(_syncCloudNotifications);
       _syncCareReminderPolling();
+      _syncCloudNotifications();
     }
   }
 
@@ -296,8 +306,11 @@ class _MediSenseAppState extends State<MediSenseApp>
   void dispose() {
     unawaited(_deepLinkSubscription?.cancel() ?? Future<void>.value());
     _appStateProvider?.removeListener(_syncVoiceNavigationMode);
+    _appStateProvider?.removeListener(_syncCloudNotifications);
     _authProvider?.removeListener(_syncCareReminderPolling);
+    _authProvider?.removeListener(_syncCloudNotifications);
     _careReminderTimer?.cancel();
+    unawaited(_guardianPush.dispose());
     _router.routerDelegate.removeListener(_onRouteChanged);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
@@ -409,6 +422,15 @@ class _MediSenseAppState extends State<MediSenseApp>
     _careReminderTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       unawaited(_checkCareReminders(patientId));
     });
+  }
+
+  void _syncCloudNotifications() {
+    final auth = _authProvider;
+    _guardianPush.sync(
+      userId: auth?.isLoggedIn == true ? auth!.userId : null,
+      isGuardian: auth?.isGuardian == true,
+      notificationsEnabled: _appStateProvider?.notificationsEnabled ?? true,
+    );
   }
 
   Future<void> _checkCareReminders(String patientId) async {
@@ -563,6 +585,7 @@ class _MediSenseAppState extends State<MediSenseApp>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _careReminderForeground = state == AppLifecycleState.resumed;
     _syncCareReminderPolling();
+    if (_careReminderForeground) _syncCloudNotifications();
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
       try {

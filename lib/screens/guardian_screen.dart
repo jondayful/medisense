@@ -547,12 +547,9 @@ class _GuardianScreenState extends State<GuardianScreen> {
       return;
     }
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Pairing declined.'),
-          backgroundColor: AppTheme.secondaryTextColor(context),
-        ),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Pairing declined.')));
       _loadPairings();
     }
   }

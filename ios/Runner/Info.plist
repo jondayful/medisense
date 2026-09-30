@@ -47,6 +47,11 @@
 	<string>667948555890-obght55e2oc8g3klgas96iqudsa34s37.apps.googleusercontent.com</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>remote-notification</string>
+	</array>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This app requires microphone access for offline voice navigation and assistant features.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>

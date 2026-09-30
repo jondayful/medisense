@@ -1,5 +1,6 @@
 # Builds an unsigned iPhone IPA for local signing on Windows. This does not
 # upload to TestFlight or make an IPA that iOS can install without signing.
+# iOS Firebase configuration is optional for this free-account test build.
 workflows:
   ios-unsigned-sideload:
     name: MediSense iOS unsigned IPA (Windows sideload)
@@ -15,8 +16,10 @@ workflows:
         script: |
           python3 - <<'PY'
           import json
+          import base64
           import os
           import pathlib
+          import plistlib
           import re
 
           required = (
@@ -47,6 +50,16 @@ workflows:
               'IOS_GOOGLE_URL_SCHEME = com.googleusercontent.apps.' + match.group(1) + '\n',
               encoding='utf-8',
           )
+          if os.environ.get('IOS_FIREBASE_CONFIG_BASE64'):
+              encoded_firebase = ''.join(os.environ['IOS_FIREBASE_CONFIG_BASE64'].split())
+              contents = base64.b64decode(encoded_firebase, validate=True)
+              plist = plistlib.loads(contents)
+              if plist.get('BUNDLE_ID') != 'com.matech.medisense':
+                  raise SystemExit('Firebase iOS bundle ID does not match MediSense')
+              (build_dir / 'ios' / 'Runner' / 'GoogleService-Info.plist').write_bytes(contents)
+              print('iOS Firebase push configuration prepared')
+          else:
+              print('iOS Firebase push configuration skipped for unsigned build')
           print('iOS build configuration prepared')
           PY
       - name: Get Flutter packages

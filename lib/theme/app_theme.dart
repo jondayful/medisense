@@ -117,6 +117,34 @@ class AppTheme {
     );
   }
 
+  /// Floating feedback sits above Scaffold's bottom navigation/keyboard.
+  /// The Scaffold already accounts for the capsule height, so only a small
+  /// breathing gap belongs in the snackbar's own inset.
+  static SnackBarThemeData _feedbackTheme({
+    required Color background,
+    required Color foreground,
+    required bool largeText,
+    Color? border,
+  }) {
+    return SnackBarThemeData(
+      behavior: SnackBarBehavior.floating,
+      insetPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      backgroundColor: background,
+      contentTextStyle: textStyle(
+        fontSize: largeText ? 20 : 14,
+        fontWeight: largeText ? FontWeight.w700 : FontWeight.w600,
+        color: foreground,
+        height: 1.3,
+      ),
+      actionTextColor: foreground,
+      closeIconColor: foreground,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: border == null ? BorderSide.none : BorderSide(color: border),
+      ),
+    );
+  }
+
   /// All-caps micro label, the voice of a prescription leaflet: wide tracking,
   /// medium size, always a quiet guide above a headline or a stat.
   static TextStyle microLabel({
@@ -425,18 +453,10 @@ class AppTheme {
           return Colors.white;
         }),
       ),
-      snackBarTheme: SnackBarThemeData(
-        behavior: SnackBarBehavior.floating,
-        // Clear the floating capsule navigation bar, including the large
-        // elderly bar, its safe-area spacing, and a 16dp breathing gap.
-        insetPadding: const EdgeInsets.fromLTRB(16, 0, 16, 124),
-        backgroundColor: inkText,
-        contentTextStyle: AppTheme.textStyle(
-          fontSize: 14,
-          fontWeight: FontWeight.w600,
-          color: Colors.white,
-        ),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      snackBarTheme: _feedbackTheme(
+        background: inkText,
+        foreground: Colors.white,
+        largeText: false,
       ),
       dialogTheme: DialogThemeData(
         backgroundColor: Colors.white,
@@ -618,16 +638,11 @@ class AppTheme {
           return Colors.white;
         }),
       ),
-      snackBarTheme: SnackBarThemeData(
-        behavior: SnackBarBehavior.floating,
-        insetPadding: const EdgeInsets.fromLTRB(16, 0, 16, 124),
-        backgroundColor: darkTextPrimary,
-        contentTextStyle: AppTheme.textStyle(
-          fontSize: 14,
-          fontWeight: FontWeight.w600,
-          color: Colors.black,
-        ),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      snackBarTheme: _feedbackTheme(
+        background: darkCardSurface,
+        foreground: darkTextPrimary,
+        largeText: false,
+        border: darkBorder,
       ),
       dialogTheme: DialogThemeData(
         backgroundColor: darkSurface,
@@ -811,16 +826,10 @@ class AppTheme {
           height: 1.4,
         ),
       ),
-      snackBarTheme: SnackBarThemeData(
-        behavior: SnackBarBehavior.floating,
-        insetPadding: const EdgeInsets.fromLTRB(16, 0, 16, 124),
-        backgroundColor: elderInk,
-        contentTextStyle: AppTheme.textStyle(
-          fontSize: 20,
-          fontWeight: FontWeight.w700,
-          color: Colors.white,
-        ),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      snackBarTheme: _feedbackTheme(
+        background: elderInk,
+        foreground: Colors.white,
+        largeText: true,
       ),
       bottomNavigationBarTheme: const BottomNavigationBarThemeData(
         backgroundColor: elderCard,
@@ -991,16 +1000,11 @@ class AppTheme {
           height: 1.4,
         ),
       ),
-      snackBarTheme: SnackBarThemeData(
-        behavior: SnackBarBehavior.floating,
-        insetPadding: const EdgeInsets.fromLTRB(16, 0, 16, 124),
-        backgroundColor: elderDarkInk,
-        contentTextStyle: AppTheme.textStyle(
-          fontSize: 20,
-          fontWeight: FontWeight.w700,
-          color: elderDarkPaper,
-        ),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      snackBarTheme: _feedbackTheme(
+        background: elderDarkCard,
+        foreground: elderDarkInk,
+        largeText: true,
+        border: darkBorder,
       ),
       bottomNavigationBarTheme: const BottomNavigationBarThemeData(
         backgroundColor: elderDarkCard,

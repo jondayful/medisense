@@ -90,10 +90,11 @@ Deno.serve(async (request) => {
 
   const { data: existing, error: existingError } = await admin
     .from('pairings')
-    .select('id, status')
+    .select('id, status, created_at')
     .eq('guardian_id', guardian.id)
     .eq('patient_id', patient.id)
     .in('status', ['pending', 'accepted'])
+    .order('status', { ascending: true })
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -105,7 +106,19 @@ Deno.serve(async (request) => {
     return Response.json({ status: 'request_processed' }, { status: 200, headers: jsonHeaders });
   }
 
-  const pairing = existing ?? {
+  // Match the 30-day expiry in supabase/sql/20260930000000_data_retention.sql.
+  const invitationExpired = existing?.status === 'pending' &&
+    new Date(existing.created_at).getTime() < Date.now() - 30 * 86400000;
+  if (invitationExpired) {
+    const { error: deleteError } = await admin.from('pairings')
+      .delete().eq('id', existing.id).eq('status', 'pending');
+    if (deleteError) {
+      console.error('Expired pairing cleanup failed:', deleteError.code);
+      return Response.json({ error: 'Could not refresh the invitation. Please try again.' }, { status: 500, headers: jsonHeaders });
+    }
+  }
+
+  const pairing = !invitationExpired && existing ? existing : {
     id: crypto.randomUUID(),
     guardian_id: guardian.id,
     guardian_email: guardian.email,
@@ -116,9 +129,13 @@ Deno.serve(async (request) => {
     status: 'pending',
     created_at: new Date().toISOString(),
   };
-  if (!existing) {
+  if (!existing || invitationExpired) {
     const { error: insertError } = await admin.from('pairings').insert(pairing);
     if (insertError) {
+      // A concurrent request may have created this same active relationship.
+      if (insertError.code === '23505') {
+        return Response.json({ status: 'request_processed' }, { status: 200, headers: jsonHeaders });
+      }
       console.error('Pairing insert failed:', insertError.code, insertError.message);
       return Response.json({ error: 'Could not save the invitation. Please try again.' }, { status: 500, headers: jsonHeaders });
     }
@@ -142,7 +159,7 @@ Deno.serve(async (request) => {
 
   if (!emailResponse.ok) {
     console.error('Resend rejected pairing invitation:', emailResponse.status);
-    if (!existing) {
+    if (!existing || invitationExpired) {
       await admin.from('pairings').delete().eq('id', pairing.id).eq('status', 'pending');
     }
     return Response.json({ error: 'The invitation email could not be sent. Please try again later.' }, { status: 502, headers: jsonHeaders });

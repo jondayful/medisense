@@ -350,6 +350,28 @@ class SupabaseSyncService {
     return result == null ? null : Map<String, dynamic>.from(result);
   }
 
+  Future<String?> getPairedPatientName(String patientId) async {
+    final uuid = nullableUuid(patientId);
+    if (!isInitialized ||
+        uuid == null ||
+        SupabaseService.client.auth.currentUser == null) {
+      return null;
+    }
+    try {
+      final response = await SupabaseService.client.functions
+          .invoke('patient-display-name', body: {'patient_id': uuid})
+          .timeout(const Duration(seconds: 10));
+      if (response.status < 200 || response.status >= 300) return null;
+      final data = response.data;
+      if (data is! Map) return null;
+      final name = data['name']?.toString().trim();
+      return name == null || name.isEmpty ? null : name;
+    } catch (error) {
+      debugPrint('SupabaseSync: patient name lookup failed - $error');
+      return null;
+    }
+  }
+
   Future<Map<String, dynamic>?> findUserByEmail(String email) async {
     if (!isInitialized) return null;
     final currentUser = SupabaseService.client.auth.currentUser;

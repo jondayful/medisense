@@ -303,7 +303,6 @@ class _AuthScreenState extends State<AuthScreen> {
                 content: Text(
                   'Account found but password is incorrect. Use Forgot Password if needed.',
                 ),
-                backgroundColor: AppTheme.warning,
                 behavior: SnackBarBehavior.floating,
                 duration: Duration(seconds: 4),
               ),
@@ -908,7 +907,6 @@ class _AuthScreenState extends State<AuthScreen> {
             content: Text(
               'No internet connection. Please try again when online.',
             ),
-            backgroundColor: AppTheme.warning,
           ),
         );
       }

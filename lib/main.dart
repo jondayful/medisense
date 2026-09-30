@@ -75,7 +75,7 @@ void main() async {
           update: (_, notifications, auth, medication) => medication!
             ..updateNotificationProvider(notifications)
             ..updateAppStateProvider(appState)
-            ..updateUserId(auth.userId),
+            ..updateUserId(auth.userId, isPatientAccount: auth.isPatient),
         ),
         ChangeNotifierProvider.value(value: appState),
         ChangeNotifierProvider(create: (_) => TtsProvider()),

@@ -49,6 +49,8 @@ dependencies:
       ref: e655a96f0ce0dadb5ea8900aa1ba23260c3ec904
   app_links: ^7.2.1
   sqflite_common_ffi: 2.4.3
+  firebase_core: ^4.15.0
+  firebase_messaging: ^16.7.0
 dev_dependencies:
   flutter_test:
     sdk: flutter
