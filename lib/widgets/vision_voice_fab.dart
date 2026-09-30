@@ -157,6 +157,7 @@ class _VisionVoiceFabState extends State<VisionVoiceFab>
                   'LANGUAGE_UNAVAILABLE',
                   'SPEECH_PERMISSION',
                   'MICROPHONE_PERMISSION',
+                  'SPEECH_RUNTIME',
                 }.contains(error.code)
             ? error.message ??
                   'Speech recognition is unavailable on this device.'

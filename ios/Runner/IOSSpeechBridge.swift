@@ -75,7 +75,9 @@ final class IOSSpeechBridge {
     recognizer = selected
     let audioSession = AVAudioSession.sharedInstance()
     do {
-      try audioSession.setCategory(.record, mode: .measurement)
+      // Keep the speaker route available when a spoken cue follows a command.
+      // The TTS plugin switches the shared session back to playback itself.
+      try audioSession.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker])
       try audioSession.setActive(true)
       let request = SFSpeechAudioBufferRecognitionRequest()
       request.shouldReportPartialResults = true
@@ -85,6 +87,10 @@ final class IOSSpeechBridge {
 
       let input = audioEngine.inputNode
       let format = input.outputFormat(forBus: 0)
+      guard format.sampleRate > 0 && format.channelCount > 0 else {
+        throw NSError(domain: "MediSenseSpeech", code: 1,
+                      userInfo: [NSLocalizedDescriptionKey: "The microphone has no active input format."])
+      }
       input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
         request.append(buffer)
       }
@@ -119,6 +125,7 @@ final class IOSSpeechBridge {
   }
 
   private func stop() {
+    let ownedSession = listening || tapInstalled || audioEngine.isRunning || request != nil || task != nil
     generation += 1
     listening = false
     if audioEngine.isRunning { audioEngine.stop() }
@@ -131,6 +138,8 @@ final class IOSSpeechBridge {
     task = nil
     request = nil
     recognizer = nil
-    try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    if ownedSession {
+      try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
   }
 }

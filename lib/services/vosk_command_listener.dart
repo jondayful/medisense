@@ -52,6 +52,8 @@ class VoskCommandListener {
   StreamSubscription<String>? _resultSubscription;
   Future<void>? _initialization;
   Future<void>? _stopOperation;
+  Future<void>? _startOperation;
+  int _startGeneration = 0;
   Timer? _silenceTimer;
   Timer? _partialDispatchTimer;
   Timer? _preferredTranscriptTimer;
@@ -110,7 +112,18 @@ class VoskCommandListener {
           await _handleResult(jsonEncode({'text': text}));
         } else if (call.method == 'error') {
           debugPrint('iOS speech recognition failed: $text');
-          await stop();
+          final session = _sessionCompleter;
+          await stop(completeSession: false);
+          if (session != null && !session.isCompleted) {
+            session.completeError(
+              PlatformException(
+                code: 'SPEECH_RUNTIME',
+                message: text.isEmpty
+                    ? 'Speech recognition stopped unexpectedly.'
+                    : text,
+              ),
+            );
+          }
         }
       });
       _iosReady = true;
@@ -175,8 +188,29 @@ class VoskCommandListener {
     }
   }
 
-  Future<void> start({String? absoluteModelPath}) async {
+  Future<void> start({String? absoluteModelPath}) {
+    final pending = _startOperation;
+    if (pending != null) return pending;
+    final generation = _startGeneration;
+    final previousStop = _stopOperation;
+    final operation = _startInternal(
+      absoluteModelPath,
+      generation,
+      previousStop,
+    );
+    _startOperation = operation;
+    return operation.whenComplete(() {
+      if (identical(_startOperation, operation)) _startOperation = null;
+    });
+  }
+
+  Future<void> _startInternal(
+    String? absoluteModelPath,
+    int generation,
+    Future<void>? previousStop,
+  ) async {
     if (_disposed) throw StateError('Vosk listener has been disposed.');
+    await previousStop;
     if (_speechService == null && !_iosReady) {
       if (absoluteModelPath == null) {
         throw StateError(
@@ -186,6 +220,9 @@ class VoskCommandListener {
       await initialize(absoluteModelPath);
     }
     await ensureMicrophonePermission();
+    if (_disposed || generation != _startGeneration) {
+      throw StateError('Voice session was cancelled.');
+    }
     if (_isListening) return;
     if (Platform.isIOS) {
       _isListening = true;
@@ -288,6 +325,7 @@ class VoskCommandListener {
   /// settle window before a caller starts TTS. `vosk_flutter` does not expose
   /// Android's AudioFocus callbacks; an awaited stop is its release signal.
   Future<void> stop({bool completeSession = true}) async {
+    ++_startGeneration;
     if (_disposed) {
       _silenceTimer?.cancel();
       _partialDispatchTimer?.cancel();
@@ -315,6 +353,12 @@ class VoskCommandListener {
     _silenceTimer = null;
     _partialDispatchTimer?.cancel();
     _partialDispatchTimer = null;
+    try {
+      await _startOperation;
+    } catch (_) {
+      // An interrupted permission request or cancelled start still needs the
+      // session completer below to be released.
+    }
     final wasListening = _isListening;
     _isListening = false;
     try {

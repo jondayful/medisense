@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
@@ -11,6 +13,7 @@ import '../providers/auth_provider.dart';
 import '../providers/medication_provider.dart';
 import '../providers/notification_provider.dart';
 import '../providers/tts_provider.dart';
+import '../providers/voice_navigation_provider.dart';
 import '../widgets/elder_bottom_nav.dart';
 import '../widgets/mode_card.dart';
 import '../widgets/medi_bottom_nav.dart';
@@ -28,6 +31,21 @@ String _verbosityDescription(TtsVerbosity verbosity) {
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
+
+  Future<void> _previewVoice(
+    BuildContext context,
+    String english,
+    String filipino,
+  ) async {
+    final voice = context.read<VoiceNavigationProvider>();
+    final tts = context.read<TtsProvider>();
+    final pause = await voice.pauseNavigation();
+    try {
+      await tts.speakCue(english, filipino);
+    } finally {
+      pause.release();
+    }
+  }
 
   Future<void> _selectMode(BuildContext context, AccessibilityMode mode) async {
     final appState = context.read<AppStateProvider>();
@@ -207,8 +225,10 @@ class SettingsScreen extends StatelessWidget {
                   ),
                   subtitle: Text(
                     ttsProvider.language == AppLanguage.filipino
-                        ? 'Naka-set sa Tagalog'
-                        : 'Set to English',
+                        ? ttsProvider.filipinoVoiceAvailable == false
+                              ? 'Filipino speech voice is unavailable on this iPhone. Add a Filipino voice in iOS speech settings.'
+                              : 'Filipino voice and commands. Keyboard language does not change this setting.'
+                        : 'English voice and commands. Select Filipino for Tagalog speech.',
                     style: AppTheme.textStyle(
                       fontSize: captionSize,
                       color: secondary,
@@ -225,7 +245,14 @@ class SettingsScreen extends StatelessWidget {
                     ttsProvider.setLanguage(
                       val ? AppLanguage.filipino : AppLanguage.english,
                     );
-                    appState.toggleLanguage();
+                    appState.setFilipino(val);
+                    unawaited(
+                      _previewVoice(
+                        context,
+                        'English voice selected.',
+                        'Napili ang boses na Filipino.',
+                      ),
+                    );
                   },
                   activeTrackColor: accent,
                 ),
@@ -383,9 +410,12 @@ class SettingsScreen extends StatelessWidget {
                     iconSize: rowIconSize,
                     titleSize: rowTitleSize,
                     accent: accent,
-                    onTest: () => ttsProvider.speak(
-                      'This is your selected loudness.',
-                      'Ito ang napili mong lakas ng boses.',
+                    onTest: () => unawaited(
+                      _previewVoice(
+                        context,
+                        'This is your selected loudness.',
+                        'Ito ang napili mong lakas ng boses.',
+                      ),
                     ),
                   ),
                   VoiceLevelPicker(
@@ -403,6 +433,13 @@ class SettingsScreen extends StatelessWidget {
                       );
                       appState.setTtsVolume(value);
                       ttsProvider.setVolume(value);
+                      unawaited(
+                        _previewVoice(
+                          context,
+                          'Volume level $level.',
+                          'Lakas ng boses, antas $level.',
+                        ),
+                      );
                     },
                   ),
                   Center(
@@ -423,9 +460,12 @@ class SettingsScreen extends StatelessWidget {
                     iconSize: rowIconSize,
                     titleSize: rowTitleSize,
                     accent: accent,
-                    onTest: () => ttsProvider.speak(
-                      'This is your selected speaking speed.',
-                      'Ito ang napili mong bilis ng pagsasalita.',
+                    onTest: () => unawaited(
+                      _previewVoice(
+                        context,
+                        'This is your selected speaking speed.',
+                        'Ito ang napili mong bilis ng pagsasalita.',
+                      ),
                     ),
                   ),
                   const SizedBox(height: 4),
@@ -444,6 +484,13 @@ class SettingsScreen extends StatelessWidget {
                       );
                       appState.setTtsSpeed(value);
                       ttsProvider.setSpeechRate(value);
+                      unawaited(
+                        _previewVoice(
+                          context,
+                          'Speaking speed level $level.',
+                          'Bilis ng pagsasalita, antas $level.',
+                        ),
+                      );
                     },
                   ),
                   Center(
@@ -464,9 +511,12 @@ class SettingsScreen extends StatelessWidget {
                     iconSize: rowIconSize,
                     titleSize: rowTitleSize,
                     accent: accent,
-                    onTest: () => ttsProvider.speak(
-                      'This is your selected voice pitch.',
-                      'Ito ang napili mong tono ng boses.',
+                    onTest: () => unawaited(
+                      _previewVoice(
+                        context,
+                        'This is your selected voice pitch.',
+                        'Ito ang napili mong tono ng boses.',
+                      ),
                     ),
                   ),
                   const SizedBox(height: 4),
@@ -485,6 +535,13 @@ class SettingsScreen extends StatelessWidget {
                       );
                       appState.setTtsPitch(value);
                       ttsProvider.setPitch(value);
+                      unawaited(
+                        _previewVoice(
+                          context,
+                          'Voice pitch level $level.',
+                          'Tono ng boses, antas $level.',
+                        ),
+                      );
                     },
                   ),
                   Center(
@@ -526,7 +583,7 @@ class SettingsScreen extends StatelessWidget {
                           'Detailed. Ilalarawan ko ang mga pahina, pindutan, dose, at susunod na hakbang.',
                         ),
                       };
-                      ttsProvider.speak(sample.$1, sample.$2);
+                      unawaited(_previewVoice(context, sample.$1, sample.$2));
                     },
                     accent: accent,
                     large: isElder,

@@ -70,6 +70,9 @@ class _MediSenseAppState extends State<MediSenseApp>
       if (!mounted) return;
       final tts = context.read<TtsProvider>();
       final appState = context.read<AppStateProvider>();
+      tts.setLanguage(
+        appState.isFilipino ? AppLanguage.filipino : AppLanguage.english,
+      );
       tts.setSpeechRate(appState.ttsSpeed);
       tts.setPitch(appState.ttsPitch);
       tts.setVolume(appState.ttsVolume);

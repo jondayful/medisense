@@ -119,6 +119,9 @@ class _MediScanScreenState extends State<MediScanScreen>
   Future<XFile>? _pictureTask;
   bool _captureCycleActive = false;
   bool _streamCapturePending = false;
+  // A shutter tap takes priority once an automatic capture releases the camera.
+  bool _manualCapturePending = false;
+  bool _manualCaptureStarting = false;
   bool _imageInferenceActive = false;
   DateTime? _lastVoiceFeedbackAt;
   String? _lastVoiceFeedback;
@@ -469,6 +472,8 @@ class _MediScanScreenState extends State<MediScanScreen>
     if (_screenDisposing ||
         _cameraSuspended ||
         _isFlashChanging ||
+        _manualCapturePending ||
+        _manualCaptureStarting ||
         _captureCycleActive ||
         _streamCapturePending ||
         _scanResult != null ||
@@ -542,7 +547,7 @@ class _MediScanScreenState extends State<MediScanScreen>
 
   void _scheduleStreamStillFallback(CameraOcrStreamService stream) {
     _streamFallbackTimer?.cancel();
-    _streamFallbackTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+    _streamFallbackTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!mounted ||
           _screenDisposing ||
           _cameraSuspended ||
@@ -580,6 +585,7 @@ class _MediScanScreenState extends State<MediScanScreen>
         } finally {
           _streamCapturePending = false;
           if (mounted && !_screenDisposing && !_cameraSuspended) {
+            _runPendingManualCapture();
             _startAutoScan();
           }
         }
@@ -735,6 +741,7 @@ class _MediScanScreenState extends State<MediScanScreen>
       } finally {
         _streamCapturePending = false;
         if (mounted && !_screenDisposing && !_cameraSuspended) {
+          _runPendingManualCapture();
           _startAutoScan();
         }
       }
@@ -830,7 +837,10 @@ class _MediScanScreenState extends State<MediScanScreen>
         _flashChangeCompleter = null;
       }
       if (!flashChange.isCompleted) flashChange.complete();
-      if (mounted && !_screenDisposing && !_cameraSuspended) _startAutoScan();
+      if (mounted && !_screenDisposing && !_cameraSuspended) {
+        _runPendingManualCapture();
+        _startAutoScan();
+      }
     }
   }
 
@@ -851,6 +861,51 @@ class _MediScanScreenState extends State<MediScanScreen>
       if (!mounted) return;
       setState(() => _zoomLevel = target);
     } catch (_) {}
+  }
+
+  void _requestManualCapture() {
+    if (!mounted ||
+        _screenDisposing ||
+        _cameraSuspended ||
+        _manualCaptureStarting) {
+      return;
+    }
+    _manualCapturePending = true;
+    _autoScanTimer?.cancel();
+    _initialAutoScanTimer?.cancel();
+    _streamFallbackTimer?.cancel();
+    _runPendingManualCapture();
+  }
+
+  void _runPendingManualCapture() {
+    if (!_manualCapturePending || _manualCaptureStarting) return;
+    if (!mounted || _screenDisposing || _cameraSuspended) {
+      _manualCapturePending = false;
+      return;
+    }
+    if (_captureCycleActive ||
+        _streamCapturePending ||
+        _isFlashChanging ||
+        _isScanning ||
+        _reviewingPrescription ||
+        _isGuidedFlowActive) {
+      return;
+    }
+    if (_cameraController?.value.isInitialized != true) {
+      _manualCapturePending = false;
+      return;
+    }
+    _manualCaptureStarting = true;
+    unawaited(
+      _captureAndReadLabel().whenComplete(() {
+        _manualCaptureStarting = false;
+        if (_manualCapturePending) {
+          _runPendingManualCapture();
+        } else if (mounted && !_screenDisposing && !_cameraSuspended) {
+          _startAutoScan();
+        }
+      }),
+    );
   }
 
   Future<void> _captureAndReadLabel({
@@ -893,6 +948,12 @@ class _MediScanScreenState extends State<MediScanScreen>
         _isGuidedFlowActive ||
         (automatic && (tts.isSpeaking || _cameraHintActive)) ||
         (automatic && _waitForManualScanAfterBatch)) {
+      if (!automatic &&
+          !_captureCycleActive &&
+          !_streamCapturePending &&
+          !_isScanning) {
+        _manualCapturePending = false;
+      }
       if (capturedImage != null) {
         unawaited(_deleteCaptureFile(capturedImage.path));
       }
@@ -904,6 +965,12 @@ class _MediScanScreenState extends State<MediScanScreen>
         controller.value.isTakingPicture ||
         (capturedImage == null && controller.value.isStreamingImages) ||
         _isScanning) {
+      if (!automatic &&
+          !_captureCycleActive &&
+          !_streamCapturePending &&
+          !_isScanning) {
+        _manualCapturePending = false;
+      }
       if (capturedImage != null) {
         unawaited(_deleteCaptureFile(capturedImage.path));
       }
@@ -911,6 +978,7 @@ class _MediScanScreenState extends State<MediScanScreen>
     }
     _captureCycleActive = true;
     if (!automatic) {
+      _manualCapturePending = false;
       _scanResultGate.reset();
       _waitForManualScanAfterBatch = false;
       HapticFeedback.heavyImpact();
@@ -1197,9 +1265,10 @@ class _MediScanScreenState extends State<MediScanScreen>
         return;
       }
 
+      var observedConflict = false;
       if (!reviewAsPrescription) {
         final resultName = result.name.toLowerCase().trim();
-        final observedConflict =
+        observedConflict =
             captureEvidence.conflictsWith(result) ||
             (automatic && previewEvidence?.conflictsWith(result) == true);
         if (automatic && (result.strengthConflict || observedConflict)) {
@@ -1212,7 +1281,15 @@ class _MediScanScreenState extends State<MediScanScreen>
         }
       }
 
-      if (automatic && !_scanResultGate.accept(result)) {
+      final previewConfirmed =
+          automatic &&
+          result.confidence >= 0.85 &&
+          result.nameConfidence >= 0.85 &&
+          !result.nameConflict &&
+          !result.strengthConflict &&
+          !observedConflict &&
+          previewEvidence?.supports(result) == true;
+      if (automatic && !previewConfirmed && !_scanResultGate.accept(result)) {
         setState(() {
           _isScanning = false;
           _statusMessage = 'Medicine found. Hold steady for one more reading.';
@@ -1255,6 +1332,8 @@ class _MediScanScreenState extends State<MediScanScreen>
       } finally {
         _pictureTask = null;
         _captureCycleActive = false;
+        if (automatic && _scanResult != null) _manualCapturePending = false;
+        _runPendingManualCapture();
         if (_scanResult == null &&
             !_reviewingPrescription &&
             !_isGuidedFlowActive &&
@@ -2853,8 +2932,11 @@ class _MediScanScreenState extends State<MediScanScreen>
                     ? _toggleFlash
                     : null,
                 onZoomToggle: cameraReady ? _toggleZoom : null,
-                onCapture: cameraReady
-                    ? () => _captureAndReadLabel(automatic: false)
+                onCapture:
+                    cameraReady &&
+                        !_reviewingPrescription &&
+                        !_isGuidedFlowActive
+                    ? _requestManualCapture
                     : null,
               ),
             ),

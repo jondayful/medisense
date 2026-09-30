@@ -83,7 +83,11 @@ class AppStateProvider extends ChangeNotifier {
     _onboardingSeen = firstLaunch == true
         ? false
         : (storedOnboardingSeen ?? firstLaunch == false);
-    _isFilipino = _prefs!.getBool('isFilipino') ?? false;
+    final locales = WidgetsBinding.instance.platformDispatcher.locales;
+    final deviceLanguage = locales.isEmpty ? '' : locales.first.languageCode;
+    _isFilipino =
+        _prefs!.getBool('isFilipino') ??
+        (deviceLanguage == 'fil' || deviceLanguage == 'tl');
     _notificationsEnabled = _prefs!.getBool('notificationsEnabled') ?? true;
     _darkMode = _prefs!.getBool('darkMode') ?? false;
     _ttsSpeed = VoiceLevels.valueFor(
@@ -237,7 +241,12 @@ class AppStateProvider extends ChangeNotifier {
   }
 
   void toggleLanguage() {
-    _isFilipino = !_isFilipino;
+    setFilipino(!_isFilipino);
+  }
+
+  void setFilipino(bool enabled) {
+    if (_isFilipino == enabled) return;
+    _isFilipino = enabled;
     _saveBool('isFilipino', _isFilipino);
     notifyListeners();
   }

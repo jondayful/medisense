@@ -1,7 +1,4 @@
-import 'dart:ui' as ui;
-
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
@@ -49,12 +46,10 @@ class MediBottomNav extends StatelessWidget {
 
     final isDarkTheme = Theme.of(context).brightness == Brightness.dark;
     final isDarkSurface = dark || isDarkTheme;
-    final useBoundedIosBlur = defaultTargetPlatform == TargetPlatform.iOS;
-    final materialColor = isDarkSurface
-        ? AppTheme.darkCardSurface.withValues(alpha: 0.85)
-        : AppTheme.card.withValues(alpha: 0.85);
-    final surfaceColor = useBoundedIosBlur || isDarkSurface
-        ? materialColor
+    // A live backdrop filter over the camera preview forced an extra GPU pass
+    // on iPhone whenever the bar rebuilt during scanning or speech updates.
+    final surfaceColor = isDarkSurface
+        ? AppTheme.darkCardSurface
         : AppTheme.card;
     final capsuleBorderColor = isDarkSurface
         ? AppTheme.darkBorder
@@ -75,68 +70,24 @@ class MediBottomNav extends StatelessWidget {
         .watch<AppStateProvider>()
         .voiceNavigationEnabled;
 
-    // Voice Navigation always uses the same raised, centered microphone dock.
-    // This gives every display mode one reliable place to start a command.
-    if (voiceNavigationEnabled) {
-      return SafeArea(
-        top: false,
-        minimum: const EdgeInsets.fromLTRB(16, 8, 16, 14),
+    // Keep one bottom-bar geometry while Voice Navigation toggles. Replacing
+    // the whole bar used to change Scaffold's body height mid-interaction.
+    return SafeArea(
+      top: false,
+      minimum: const EdgeInsets.fromLTRB(16, 8, 16, 14),
+      child: RepaintBoundary(
         child: _VisionLossNavBar(
           items: items,
           selectedIndex: selectedIndex,
           dark: isDarkSurface,
           large: visionLoss || large,
+          showMic: voiceNavigationEnabled,
           materialColor: surfaceColor,
           borderColor: capsuleBorderColor,
           shadow: capsuleShadow,
           onNavigate: (route) => context.go(route),
         ),
-      );
-    }
-
-    final bar = RepaintBoundary(
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          border: Border.all(color: capsuleBorderColor, width: 1),
-          borderRadius: BorderRadius.circular(34),
-          boxShadow: [capsuleShadow],
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(34),
-          child: _TabBarSurface(
-            color: surfaceColor,
-            useBlur: useBoundedIosBlur,
-            child: SizedBox(
-              height: large ? 84 : 60,
-              child: Row(
-                children: [
-                  for (var i = 0; i < items.length; i++)
-                    Expanded(
-                      child: _NavItem(
-                        inactiveIcon: items[i].$1,
-                        activeIcon: items[i].$2,
-                        label: items[i].$3,
-                        selected: i == selectedIndex,
-                        large: large,
-                        dark: isDarkSurface,
-                        onTap: () => context.go(items[i].$4),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-        ),
       ),
-    );
-
-    // SafeArea keeps the capsule above the home indicator. Horizontal and
-    // vertical margins are fixed, so scrolling/camera frames never trigger a
-    // relayout of the tab bar geometry.
-    return SafeArea(
-      top: false,
-      minimum: const EdgeInsets.fromLTRB(20, 8, 20, 14),
-      child: bar,
     );
   }
 }
@@ -146,6 +97,7 @@ class _VisionLossNavBar extends StatelessWidget {
   final int selectedIndex;
   final bool dark;
   final bool large;
+  final bool showMic;
   final Color materialColor;
   final Color borderColor;
   final BoxShadow shadow;
@@ -156,6 +108,7 @@ class _VisionLossNavBar extends StatelessWidget {
     required this.selectedIndex,
     required this.dark,
     required this.large,
+    required this.showMic,
     required this.materialColor,
     required this.borderColor,
     required this.shadow,
@@ -190,14 +143,15 @@ class _VisionLossNavBar extends StatelessWidget {
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(34),
-                child: _TabBarSurface(
+                child: ColoredBox(
                   color: materialColor,
-                  useBlur: defaultTargetPlatform == TargetPlatform.iOS,
                   child: LayoutBuilder(
                     builder: (context, constraints) {
                       final hasGuardian = items.length > 4;
                       final leftCount = hasGuardian ? 2 : items.length ~/ 2;
-                      final centerGap = hasGuardian
+                      final centerGap = !showMic
+                          ? 0.0
+                          : hasGuardian
                           ? (constraints.maxWidth * 0.18)
                                 .clamp(52.0, 68.0)
                                 .toDouble()
@@ -244,7 +198,8 @@ class _VisionLossNavBar extends StatelessWidget {
               ),
             ),
           ),
-          const Positioned(top: 0, child: VisionVoiceFab(embedded: true)),
+          if (showMic)
+            const Positioned(top: 0, child: VisionVoiceFab(embedded: true)),
         ],
       ),
     );
@@ -265,38 +220,6 @@ class _VisionLossNavBar extends StatelessWidget {
       dark: dark,
       compactLabel: compactLabel,
       onTap: () => onNavigate(item.$4),
-    );
-  }
-}
-
-class _TabBarSurface extends StatelessWidget {
-  final Color color;
-  final bool useBlur;
-  final Widget child;
-
-  const _TabBarSurface({
-    required this.color,
-    required this.useBlur,
-    required this.child,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    if (!useBlur) {
-      return ColoredBox(color: color, child: child);
-    }
-
-    // One clipped blur region on iOS only. Android uses the same translucent
-    // material colour without a live filter to protect budget GPU frame time.
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        BackdropFilter(
-          filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-          child: ColoredBox(color: color),
-        ),
-        child,
-      ],
     );
   }
 }

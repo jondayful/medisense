@@ -610,6 +610,22 @@ class ScanPreviewEvidence {
     return strengths.toSet().length > 1 ||
         (finalStrength.isNotEmpty && strengths.first != finalStrength);
   }
+
+  /// A still OCR read can use two agreeing preview frames as its independent
+  /// confirmation. The still must agree on both name and strength.
+  bool supports(MedicineLabelResult result) {
+    if (conflictsWith(result)) return false;
+    final name = result.name
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    final strength = result.dosage.toLowerCase().replaceAll(RegExp(r'\s+'), '');
+    if (name.isEmpty || strength.isEmpty) return false;
+    return _reads
+            .where((read) => read.name == name && read.strength == strength)
+            .length >=
+        2;
+  }
 }
 
 /// Optional platform AI seam. The default implementation is intentionally a

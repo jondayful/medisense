@@ -8,7 +8,9 @@ enum AppLanguage { english, filipino }
 
 class TtsProvider extends ChangeNotifier {
   final FlutterTts _flutterTts = FlutterTts();
-  AppLanguage _language = AppLanguage.filipino;
+  AppLanguage _language = AppLanguage.english;
+  AppLanguage? _configuredLanguage;
+  bool? _filipinoVoiceAvailable;
   double _speechRate = 1.0;
   double _pitch = 1.0;
   double _volume = 1.0;
@@ -22,6 +24,7 @@ class TtsProvider extends ChangeNotifier {
   late final Future<void> _initialization;
 
   AppLanguage get language => _language;
+  bool? get filipinoVoiceAvailable => _filipinoVoiceAvailable;
 
   String _lastEnglishText = '';
   String _lastFilipinoText = '';
@@ -73,33 +76,18 @@ class TtsProvider extends ChangeNotifier {
   Future<void> setSpeechRate(double rate) async {
     if (_disposed) return;
     _speechRate = rate.clamp(0.5, 1.5).toDouble();
-    // FlutterTts uses 0.5 as its normal Android engine rate. Keep the app's
-    // 1.0x label intuitive by translating the user-facing multiplier first.
-    try {
-      await _flutterTts.setSpeechRate(_speechRate * 0.5);
-    } catch (error) {
-      debugPrint('TTS speech rate update failed: $error');
-    }
+    // Apply the latest snapshot immediately before the next utterance. Native
+    // setters sent while speak/stop is in flight can reorder on iOS.
   }
 
   Future<void> setPitch(double pitch) async {
     if (_disposed) return;
     _pitch = pitch.clamp(0.5, 2.0).toDouble();
-    try {
-      await _flutterTts.setPitch(_pitch);
-    } catch (error) {
-      debugPrint('TTS pitch update failed: $error');
-    }
   }
 
   Future<void> setVolume(double volume) async {
     if (_disposed) return;
     _volume = volume.clamp(0.0, 1.0).toDouble();
-    try {
-      await _flutterTts.setVolume(_volume);
-    } catch (error) {
-      debugPrint('TTS volume update failed: $error');
-    }
   }
 
   Future<void> _applyVoiceSettings() async {
@@ -111,26 +99,37 @@ class TtsProvider extends ChangeNotifier {
 
   Future<void> _updateTtsLanguage() async {
     if (_disposed) return;
-    final code = _language == AppLanguage.filipino ? "fil-PH" : "en-US";
-
-    final isSupported = await _flutterTts.isLanguageAvailable(code);
-    if (_disposed) return;
-    if (isSupported) {
-      await _flutterTts.setLanguage(code);
-    } else if (_language == AppLanguage.filipino) {
-      await _flutterTts.setLanguage("tl-PH");
+    final language = _language;
+    if (_configuredLanguage == language) return;
+    final candidates = language == AppLanguage.filipino
+        ? const ['fil-PH', 'tl-PH', 'fil', 'tl']
+        : const ['en-US'];
+    for (final code in candidates) {
+      if (await _flutterTts.isLanguageAvailable(code)) {
+        if (_disposed) return;
+        await _flutterTts.setLanguage(code);
+        if (language == AppLanguage.filipino &&
+            _filipinoVoiceAvailable != true) {
+          _filipinoVoiceAvailable = true;
+          notifyListeners();
+        }
+        if (_language == language) _configuredLanguage = language;
+        return;
+      }
     }
+    if (_language == language) _configuredLanguage = language;
+    if (language == AppLanguage.filipino && _filipinoVoiceAvailable != false) {
+      _filipinoVoiceAvailable = false;
+      notifyListeners();
+    }
+    debugPrint('No installed TTS voice for ${language.name}');
   }
 
-  void setLanguage(AppLanguage lang) async {
+  void setLanguage(AppLanguage lang) {
     if (_disposed) return;
+    if (_language == lang) return;
     _language = lang;
-    try {
-      await _updateTtsLanguage();
-    } catch (error) {
-      debugPrint('TTS language change failed: $error');
-    }
-    if (!_disposed) notifyListeners();
+    notifyListeners();
   }
 
   Future<void> speak(String englishText, String filipinoText) async {

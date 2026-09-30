@@ -1692,12 +1692,20 @@ class VoiceNavigationProvider extends ChangeNotifier
   void speakMicTutorial() {
     if (!_pushToTalkMode) return;
     unawaited(
-      _tts?.speak(
-            'Tap the microphone and say open camera, check the camera, scan this, go home, open your prescription, check your medicine schedule, next dose, or help. You can also say hey MediSense to start hands-free.',
-            'Pindutin ang mikropono at sabihin ang buksan ang camera, tingnan ang camera, i-scan ito, buksan ang home, tingnan ang reseta o iskedyul ng gamot, susunod na gamot, o tulong. Maaari mo ring sabihin, hey MediSense, para maghands-free.',
-          ) ??
-          Future<void>.value(),
+      _speakAnnouncement(
+        'Tap the microphone and say open camera, check the camera, scan this, go home, open your prescription, check your medicine schedule, next dose, or help. You can also say hey MediSense to start hands-free.',
+        'Pindutin ang mikropono at sabihin ang buksan ang camera, tingnan ang camera, i-scan ito, buksan ang home, tingnan ang reseta o iskedyul ng gamot, susunod na gamot, o tulong. Maaari mo ring sabihin, hey MediSense, para maghands-free.',
+      ),
     );
+  }
+
+  Future<void> _speakAnnouncement(String english, String filipino) async {
+    final pause = await pauseNavigation();
+    try {
+      if (_pushToTalkMode) await _tts?.speak(english, filipino);
+    } finally {
+      pause.release();
+    }
   }
 
   void announceScreen(String route) {
@@ -1716,15 +1724,14 @@ class VoiceNavigationProvider extends ChangeNotifier
             ),
           );
         unawaited(
-          _tts?.speak(
-                verbosity == TtsVerbosity.detailed
-                    ? '${med.name} details. Strength ${med.dosage}. Scheduled at ${times.map((s) => s.formattedTime).join(', ')}.'
-                    : '${med.name} details.',
-                verbosity == TtsVerbosity.detailed
-                    ? 'Detalye ng ${med.name}. Lakas ${med.dosage}. Nakatakda sa ${times.map((s) => s.formattedTime).join(', ')}.'
-                    : 'Detalye ng ${med.name}.',
-              ) ??
-              Future<void>.value(),
+          _speakAnnouncement(
+            verbosity == TtsVerbosity.detailed
+                ? '${med.name} details. Strength ${med.dosage}. Scheduled at ${times.map((s) => s.formattedTime).join(', ')}.'
+                : '${med.name} details.',
+            verbosity == TtsVerbosity.detailed
+                ? 'Detalye ng ${med.name}. Lakas ${med.dosage}. Nakatakda sa ${times.map((s) => s.formattedTime).join(', ')}.'
+                : 'Detalye ng ${med.name}.',
+          ),
         );
         return;
       }
@@ -1732,15 +1739,14 @@ class VoiceNavigationProvider extends ChangeNotifier
     final named = kVoiceScreenAnnouncements[route];
     if (named != null) {
       unawaited(
-        _tts?.speak(
-              verbosity == TtsVerbosity.detailed
-                  ? '${named.english}. ${_screenHelp(route, filipino: false)}'
-                  : named.english,
-              verbosity == TtsVerbosity.detailed
-                  ? '${named.filipino}. ${_screenHelp(route, filipino: true)}'
-                  : named.filipino,
-            ) ??
-            Future<void>.value(),
+        _speakAnnouncement(
+          verbosity == TtsVerbosity.detailed
+              ? '${named.english}. ${_screenHelp(route, filipino: false)}'
+              : named.english,
+          verbosity == TtsVerbosity.detailed
+              ? '${named.filipino}. ${_screenHelp(route, filipino: true)}'
+              : named.filipino,
+        ),
       );
       return;
     }
@@ -1750,11 +1756,10 @@ class VoiceNavigationProvider extends ChangeNotifier
     final due = _medications?.dosesDueNow.length ?? 0;
     if (medications.isEmpty) {
       unawaited(
-        _tts?.speak(
-              'This screen has no medicines to show yet.',
-              'Wala pang gamot na ipinapakita ang screen na ito.',
-            ) ??
-            Future<void>.value(),
+        _speakAnnouncement(
+          'This screen has no medicines to show yet.',
+          'Wala pang gamot na ipinapakita ang screen na ito.',
+        ),
       );
       return;
     }
@@ -1766,11 +1771,10 @@ class VoiceNavigationProvider extends ChangeNotifier
         ? '1 dose is due now.'
         : '$due doses are due now.';
     unawaited(
-      _tts?.speak(
-            'This screen. You have $pending. $dueText',
-            'Ang screen na ito. May $pending ka. $dueText',
-          ) ??
-          Future<void>.value(),
+      _speakAnnouncement(
+        'This screen. You have $pending. $dueText',
+        'Ang screen na ito. May $pending ka. $dueText',
+      ),
     );
   }
 
