@@ -38,6 +38,7 @@ class OcrCaptureStabilityGate {
     required double coverage,
     required bool clippedAtEdge,
     required double sharpness,
+    String? medicineName,
   }) {
     miss(at);
     if (clippedAtEdge) return false;
@@ -70,7 +71,14 @@ class OcrCaptureStabilityGate {
       // Strengths are strong evidence when both frames see them. If the
       // camera shake or crop hides a strength in one frame, stable package
       // text can still establish that the label is being held in place.
-      if ((sameStrength || !bothHaveStrength) && _similarText(key, read.key)) {
+      final sameMedicine =
+          medicineName != null && medicineName == read.medicineName;
+      final progressesFromStrength =
+          sameStrength && (_isStrengthOnly(key) || _isStrengthOnly(read.key));
+      if ((sameStrength || !bothHaveStrength) &&
+          (sameMedicine ||
+              progressesFromStrength ||
+              _similarText(key, read.key))) {
         matchingRead = read;
         break;
       }
@@ -80,7 +88,7 @@ class OcrCaptureStabilityGate {
       sharpness,
       (peak, read) => math.max(peak, read.sharpness).toDouble(),
     );
-    _reads.add(_OcrRead(key, strengths, at, sharpness));
+    _reads.add(_OcrRead(key, strengths, at, sharpness, medicineName));
     if (_reads.length > 4) _reads.removeAt(0);
 
     final stableLongEnough =
@@ -127,13 +135,25 @@ class OcrCaptureStabilityGate {
     }
     return previousRow[left.length] <= limit;
   }
+
+  bool _isStrengthOnly(String normalizedText) {
+    if (!_strengthPattern.hasMatch(normalizedText)) return false;
+    return normalizedText.replaceAll(_strengthPattern, '').trim().isEmpty;
+  }
 }
 
 class _OcrRead {
-  const _OcrRead(this.key, this.strengths, this.at, this.sharpness);
+  const _OcrRead(
+    this.key,
+    this.strengths,
+    this.at,
+    this.sharpness,
+    this.medicineName,
+  );
 
   final String key;
   final Set<String> strengths;
   final Duration at;
   final double sharpness;
+  final String? medicineName;
 }

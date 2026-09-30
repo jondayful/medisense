@@ -509,6 +509,19 @@ class ScanResultStabilityGate {
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
     if (key != _candidate) {
+      final previous = _candidate;
+      final separator = previous?.indexOf('|') ?? -1;
+      // A first still may reveal only the name. A second independent still
+      // that reads the same name plus a printed strength completes the pair.
+      if (separator >= 0 &&
+          previous!.substring(0, separator) ==
+              key.substring(0, key.indexOf('|')) &&
+          previous.substring(separator + 1).isEmpty &&
+          result.dosage.trim().isNotEmpty) {
+        _candidate = key;
+        _consecutiveReads++;
+        return _consecutiveReads >= 2;
+      }
       _candidate = key;
       _consecutiveReads = 1;
       return false;
@@ -554,12 +567,48 @@ class ScanResultStabilityGate {
 /// Keeps strength evidence from the preview frames leading to one still
 /// capture. It never chooses a dose; disagreement asks for manual review.
 class ScanPreviewEvidence {
-  ScanPreviewEvidence._(this._reads, this._conflictingNames);
+  ScanPreviewEvidence._(
+    this._reads,
+    this._conflictingNames,
+    this._nameHints,
+    this._strengthHints,
+  );
 
-  ScanPreviewEvidence() : _reads = [], _conflictingNames = <String>{};
+  ScanPreviewEvidence()
+    : _reads = [],
+      _conflictingNames = <String>{},
+      _nameHints = [],
+      _strengthHints = [];
 
   final List<({String name, String strength})> _reads;
   final Set<String> _conflictingNames;
+  final List<String> _nameHints;
+  final List<String> _strengthHints;
+
+  /// Records a unique name prefix seen before a strength becomes readable.
+  /// The hint can corroborate a later complete preview line, but cannot
+  /// provide a medicine name or dose for the final result on its own.
+  void observeNameHint(String name) {
+    final normalized = name
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (normalized.isEmpty) return;
+    _nameHints.add(normalized);
+    if (_nameHints.length > 10) _nameHints.removeAt(0);
+  }
+
+  void observeStrengthHint(String text) {
+    final matches = RegExp(
+      r'\b\d+(?:[.,]\d+)?\s*(?:mcg|mg|ml|g|iu)\b',
+      caseSensitive: false,
+    ).allMatches(text).toList(growable: false);
+    if (matches.length != 1) return;
+    _strengthHints.add(
+      matches.single.group(0)!.toLowerCase().replaceAll(RegExp(r'\s+'), ''),
+    );
+    if (_strengthHints.length > 10) _strengthHints.removeAt(0);
+  }
 
   void observe(Iterable<PrescriptionItem> items) {
     final byName = <String, Set<String>>{};
@@ -586,9 +635,13 @@ class ScanPreviewEvidence {
     final snapshot = ScanPreviewEvidence._(
       List.of(_reads),
       Set.of(_conflictingNames),
+      List.of(_nameHints),
+      List.of(_strengthHints),
     );
     _reads.clear();
     _conflictingNames.clear();
+    _nameHints.clear();
+    _strengthHints.clear();
     return snapshot;
   }
 
@@ -621,10 +674,15 @@ class ScanPreviewEvidence {
         .trim();
     final strength = result.dosage.toLowerCase().replaceAll(RegExp(r'\s+'), '');
     if (name.isEmpty || strength.isEmpty) return false;
-    return _reads
-            .where((read) => read.name == name && read.strength == strength)
-            .length >=
-        2;
+    final exactReads = _reads
+        .where((read) => read.name == name && read.strength == strength)
+        .length;
+    return exactReads >= 2 ||
+        (exactReads >= 1 &&
+            ((_nameHints.contains(name) &&
+                    _nameHints.every((hint) => hint == name)) ||
+                (_strengthHints.contains(strength) &&
+                    _strengthHints.every((hint) => hint == strength))));
   }
 }
 

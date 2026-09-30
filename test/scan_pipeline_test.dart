@@ -3,9 +3,86 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 import 'package:medisense/services/medicine_label_parser.dart';
+import 'package:medisense/services/ocr_capture_stability_gate.dart';
 import 'package:medisense/services/scan_pipeline.dart';
 
 void main() {
+  test(
+    'preview recognizes a unique medicine prefix without guessing dosage',
+    () {
+      final parser = MedicineLabelParser();
+      expect(parser.previewMedicineName('A mefe'), 'Mefenamic Acid');
+      expect(parser.previewMedicineName('caps mineral'), isNull);
+    },
+  );
+
+  test(
+    'capture gate progresses from partial name or dose to a complete read',
+    () {
+      OcrCaptureStabilityGate gate() =>
+          OcrCaptureStabilityGate(minSharpness: 50, minTextCoverage: 0.03);
+      bool observe(
+        OcrCaptureStabilityGate gate,
+        String text,
+        int milliseconds, {
+        String? medicineName,
+      }) => gate.observe(
+        text: text,
+        medicineName: medicineName,
+        at: Duration(milliseconds: milliseconds),
+        coverage: 0.05,
+        clippedAtEdge: false,
+        sharpness: 120,
+      );
+
+      final fromName = gate();
+      expect(
+        observe(fromName, 'A mefe', 0, medicineName: 'Mefenamic Acid'),
+        isFalse,
+      );
+      expect(
+        observe(
+          fromName,
+          'Mefenamic Acid 500 mg',
+          500,
+          medicineName: 'Mefenamic Acid',
+        ),
+        isTrue,
+      );
+
+      final fromDose = gate();
+      expect(observe(fromDose, '500 mg', 0), isFalse);
+      expect(
+        observe(
+          fromDose,
+          'Mefenamic Acid 500 mg',
+          500,
+          medicineName: 'Mefenamic Acid',
+        ),
+        isTrue,
+      );
+
+      final conflict = gate();
+      expect(
+        observe(
+          conflict,
+          'Mefenamic Acid 250 mg',
+          0,
+          medicineName: 'Mefenamic Acid',
+        ),
+        isFalse,
+      );
+      expect(
+        observe(
+          conflict,
+          'Mefenamic Acid 500 mg',
+          500,
+          medicineName: 'Mefenamic Acid',
+        ),
+        isFalse,
+      );
+    },
+  );
   group('MedicineCatalogRepository', () {
     const catalog = MedicineCatalogRepository(
       entries: [
@@ -78,6 +155,109 @@ void main() {
     expect(gate.accept(paracetamol), isTrue);
     expect(gate.accept(null), isFalse);
     expect(gate.accept(paracetamol), isFalse);
+  });
+
+  test('a name-only first still can pair with a complete second still', () {
+    final gate = ScanResultStabilityGate();
+    const partial = MedicineLabelResult(
+      name: 'Mefenamic Acid',
+      dosage: '',
+      confidence: 0.58,
+      nameConfidence: 0.78,
+      dosageConfidence: 0,
+      rawText: 'Mefenamic Acid',
+    );
+    const complete = MedicineLabelResult(
+      name: 'Mefenamic Acid',
+      dosage: '500 mg',
+      confidence: 0.82,
+      nameConfidence: 0.84,
+      dosageConfidence: 0.90,
+      rawText: 'Mefenamic Acid 500 mg',
+    );
+    expect(gate.accept(partial), isFalse);
+    expect(gate.accept(complete), isTrue);
+    gate.reset();
+    expect(gate.accept(partial), isFalse);
+    expect(
+      gate.accept(
+        const MedicineLabelResult(
+          name: 'Ibuprofen',
+          dosage: '500 mg',
+          confidence: 0.82,
+          nameConfidence: 0.84,
+          dosageConfidence: 0.90,
+          rawText: 'Ibuprofen 500 mg',
+        ),
+      ),
+      isFalse,
+    );
+  });
+
+  test(
+    'a partial preview name and complete preview line support the still',
+    () {
+      final evidence = ScanPreviewEvidence();
+      const item = PrescriptionItem(
+        drugName: 'Mefenamic Acid',
+        strength: '500 mg',
+        quantity: '',
+        frequency: '',
+        rawLine: 'Mefenamic Acid 500 mg',
+      );
+      const result = MedicineLabelResult(
+        name: 'Mefenamic Acid',
+        dosage: '500 mg',
+        confidence: 0.72,
+        nameConfidence: 0.72,
+        dosageConfidence: 0.85,
+        rawText: 'Mefenamic Acid 500 mg',
+      );
+      evidence.observeNameHint('Mefenamic Acid');
+      expect(evidence.supports(result), isFalse);
+      evidence.observe([item]);
+      expect(evidence.snapshotAndReset().supports(result), isTrue);
+      evidence.observeNameHint('Mefenamic Acid');
+      evidence.observe([item]);
+      expect(
+        evidence.snapshotAndReset().supports(
+          const MedicineLabelResult(
+            name: 'Mefenamic Acid',
+            dosage: '250 mg',
+            confidence: 0.72,
+            nameConfidence: 0.72,
+            dosageConfidence: 0.85,
+            rawText: 'Mefenamic Acid 250 mg',
+          ),
+        ),
+        isFalse,
+      );
+    },
+  );
+
+  test('a dosage-only preview can corroborate one complete medicine line', () {
+    final evidence = ScanPreviewEvidence();
+    const item = PrescriptionItem(
+      drugName: 'Mefenamic Acid',
+      strength: '500 mg',
+      quantity: '',
+      frequency: '',
+      rawLine: 'Mefenamic Acid 500 mg',
+    );
+    const result = MedicineLabelResult(
+      name: 'Mefenamic Acid',
+      dosage: '500 mg',
+      confidence: 0.72,
+      nameConfidence: 0.72,
+      dosageConfidence: 0.85,
+      rawText: 'Mefenamic Acid 500 mg',
+    );
+    evidence.observeStrengthHint('500 mg');
+    evidence.observe([item]);
+    expect(evidence.snapshotAndReset().supports(result), isTrue);
+    evidence.observeStrengthHint('250 mg');
+    evidence.observe([item]);
+    expect(evidence.snapshotAndReset().supports(result), isFalse);
   });
 
   test('preview strength disagreements survive until final review', () {

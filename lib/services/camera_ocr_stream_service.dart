@@ -28,6 +28,7 @@ class CameraOcrStreamService {
     required this.onCapture,
     required this.onError,
     this.onText,
+    this.previewMedicineName,
     TextRecognizer? textRecognizer,
     this.maxDimension = 1280,
     this.minSharpness = 100,
@@ -53,6 +54,9 @@ class CameraOcrStreamService {
   final ValueChanged<XFile> onCapture;
   final void Function(Object error, StackTrace stack) onError;
   final ValueChanged<RecognizedText>? onText;
+
+  /// Resolves an unambiguous medicine prefix for capture readiness only.
+  final String? Function(String text)? previewMedicineName;
   final int maxDimension;
 
   /// Variance of the luminance Laplacian; calibrate on target devices.
@@ -372,9 +376,11 @@ class CameraOcrStreamService {
       // Calculate sharpness on Android's direct path only when ML Kit has read
       // medicine-like text, rather than on every preview frame.
       var captureReady = false;
-      if (_hasMedicineSignal(text.text)) {
+      final medicineName = previewMedicineName?.call(text.text);
+      if (_hasMedicineSignal(text.text, medicineName)) {
         captureReady = _captureGate.observe(
           text: text.text,
+          medicineName: medicineName,
           at: _clock.elapsed,
           coverage: coverage,
           clippedAtEdge: clippedAtEdge,
@@ -440,12 +446,14 @@ class CameraOcrStreamService {
     return InputImageRotationValue.fromRawValue(degrees)!;
   }
 
-  bool _hasMedicineSignal(String text) {
+  bool _hasMedicineSignal(String text, String? medicineName) {
     final strength = RegExp(
       r'\b\d+(?:[.,]\d+)?\s*(?:mg|mcg|\u03bcg|\u00b5g|ug|g|ml|iu|units?)\b',
       caseSensitive: false,
     ).hasMatch(text);
     if (strength) return true;
+
+    if (medicineName != null) return true;
 
     // Some package faces show the medicine name in the camera ROI while the
     // strength is on a side panel. Let stable label text reach the capture

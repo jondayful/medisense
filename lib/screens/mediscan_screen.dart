@@ -115,6 +115,9 @@ class _MediScanScreenState extends State<MediScanScreen>
   CameraController? _cameraController;
   CameraOcrStreamService? _cameraOcrStream;
   String? _lastPreviewOcrText;
+  PrescriptionDocumentDetection? _lastPreviewDetection;
+  String? _lastPreviewLayoutText;
+  String? _lastPreviewNameHint;
   Future<void>? _cameraOpenTask;
   Future<XFile>? _pictureTask;
   bool _captureCycleActive = false;
@@ -381,20 +384,54 @@ class _MediScanScreenState extends State<MediScanScreen>
       _cameraOcrStream = CameraOcrStreamService(
         camera: opening,
         textRecognizer: _textRecognizer,
+        previewMedicineName: _labelParser.previewMedicineName,
         onHint: _onCameraOcrHint,
         onCapture: _onCameraOcrCapture,
         onError: _onCameraOcrError,
         onText: (text) {
-          // Stable text is common across adjacent OCR frames. Parsing it again
-          // would block the UI isolate without adding preview evidence.
-          if (text.text == _lastPreviewOcrText) return;
-          _lastPreviewOcrText = text.text;
-          final layoutText = _ocrCleanup
-              .clean(_labelParser.layoutRecognizedText(text))
-              .text;
-          final detection = _labelParser.detectPrescriptionDocument(layoutText);
+          // Repeated ML Kit frames are independent observations. Cache their
+          // parsing, then count each frame toward a stable preview read.
+          if (text.text != _lastPreviewOcrText ||
+              _lastPreviewDetection == null) {
+            _lastPreviewOcrText = text.text;
+            final layoutText = _ocrCleanup
+                .clean(_labelParser.layoutRecognizedText(text))
+                .text;
+            final detection = _labelParser.detectPrescriptionDocument(
+              layoutText,
+            );
+            _lastPreviewLayoutText = layoutText;
+            _lastPreviewDetection = detection;
+            _lastPreviewNameHint = detection.items.isEmpty
+                ? _labelParser.previewMedicineName(layoutText)
+                : null;
+          }
+          final detection = _lastPreviewDetection!;
           if (!detection.isPrescription) {
             _previewEvidence.observe(detection.items);
+            if (detection.items.isEmpty) {
+              _previewEvidence.observeStrengthHint(_lastPreviewLayoutText!);
+              final nameHint = _lastPreviewNameHint;
+              if (nameHint != null) {
+                _previewEvidence.observeNameHint(nameHint);
+              }
+            }
+            if (!_isScanning && _scanResult == null) {
+              final previewStatus = detection.items.length == 1
+                  ? 'Reading ${detection.items.single.drugName} '
+                        '${detection.items.single.strength}. Confirming...'
+                  : _lastPreviewNameHint != null
+                  ? 'Possible ${_lastPreviewNameHint!}. Reading strength...'
+                  : RegExp(
+                      r'\b\d+(?:[.,]\d+)?\s*(?:mcg|mg|ml|g|iu)\b',
+                      caseSensitive: false,
+                    ).hasMatch(_lastPreviewLayoutText!)
+                  ? 'Strength spotted. Reading medicine name...'
+                  : null;
+              if (previewStatus != null && _statusMessage != previewStatus) {
+                setState(() => _statusMessage = previewStatus);
+              }
+            }
           }
           // Require actual prescription structure. Density or a generic
           // heading alone is common on medicine packaging and should not
@@ -1086,7 +1123,8 @@ class _MediScanScreenState extends State<MediScanScreen>
       // network OCR. Keep the clearer read and release the derived image when
       // all OCR consumers have finished with it.
       var localOcrPath = ocrPath;
-      if (!localScan.isComplete) {
+      if (!localScan.isComplete &&
+          (!automatic || localScan.medicines.isEmpty)) {
         enhancedPath = await _imagePreprocessor.getEnhancedImage(ocrPath);
         final retryPath = enhancedPath;
         if (retryPath != null) {
@@ -1157,7 +1195,7 @@ class _MediScanScreenState extends State<MediScanScreen>
 
       // Connectivity, quota checks, and any cloud request are deferred until
       // after ML Kit and only happen when the local result is unclear.
-      final coordinatedScan = localScan.isComplete
+      final coordinatedScan = localScan.isComplete || automatic
           ? localScan
           : await _ocrCoordinator.processPrescriptionImage(
               imagePath: localOcrPath,
@@ -1283,8 +1321,9 @@ class _MediScanScreenState extends State<MediScanScreen>
 
       final previewConfirmed =
           automatic &&
-          result.confidence >= 0.85 &&
-          result.nameConfidence >= 0.85 &&
+          result.confidence >= 0.70 &&
+          result.nameConfidence >= 0.70 &&
+          result.dosage.isNotEmpty &&
           !result.nameConflict &&
           !result.strengthConflict &&
           !observedConflict &&

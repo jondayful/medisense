@@ -564,6 +564,30 @@ class MedicineLabelParser {
     ]),
   ];
 
+  /// A live preview may see only the beginning of a medicine name. A prefix
+  /// is useful for framing, but never supplies a final name or strength.
+  String? previewMedicineName(String text) {
+    final tokens = RegExp(
+      r'[A-Za-z]{4,}',
+    ).allMatches(text).map((match) => match.group(0)!.toLowerCase());
+    for (final token in tokens) {
+      final matches = _commonMedicineProfiles
+          .where((profile) {
+            return [profile.canonicalName, ...profile.aliases].any((alias) {
+              final firstWord = alias
+                  .toLowerCase()
+                  .split(RegExp(r'[^a-z]+'))
+                  .first;
+              return firstWord.length >= token.length &&
+                  firstWord.startsWith(token);
+            });
+          })
+          .toList(growable: false);
+      if (matches.length == 1) return matches.single.canonicalName;
+    }
+    return null;
+  }
+
   /// Extra generic and brand terms used only as medicine evidence. Doses are
   /// not inferred from this broad list because strengths vary by patient and
   /// product.
