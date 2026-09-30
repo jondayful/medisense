@@ -6,6 +6,8 @@ import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.provider.Settings
 import android.view.WindowManager
 import android.os.StatFs
@@ -15,6 +17,7 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private var alarmChannel: MethodChannel? = null
+    private var scanVibrator: Vibrator? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         if (intent?.action == MedicationAlarmService.ACTION_OPEN_ALARM) showAlarmOverLockScreen()
@@ -33,6 +36,41 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        scanVibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "medisense/scan_haptics")
+            .setMethodCallHandler { call, result ->
+                val vibrator = scanVibrator
+                when (call.method) {
+                    "play" -> {
+                        val timings = when (call.arguments as? String) {
+                            "noText" -> longArrayOf(0, 140)
+                            "closer" -> longArrayOf(0, 220)
+                            "farther" -> longArrayOf(0, 170, 130, 170)
+                            "steady" -> longArrayOf(0, 110, 130, 270)
+                            "detected" -> longArrayOf(0, 250, 140, 250, 140, 400)
+                            "warning" -> longArrayOf(0, 340, 180, 340)
+                            else -> null
+                        }
+                        if (timings == null) {
+                            result.error("INVALID_PATTERN", "Unknown scan haptic pattern.", null)
+                        } else {
+                            if (vibrator?.hasVibrator() == true) {
+                                val amplitudes = IntArray(timings.size) { index ->
+                                    if (index % 2 == 0) 0 else if (vibrator.hasAmplitudeControl()) 255
+                                    else VibrationEffect.DEFAULT_AMPLITUDE
+                                }
+                                vibrator.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+                            }
+                            result.success(null)
+                        }
+                    }
+                    "cancel" -> {
+                        vibrator?.cancel()
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "medisense/storage")
             .setMethodCallHandler { call, result ->
                 if (call.method != "availableBytes") {

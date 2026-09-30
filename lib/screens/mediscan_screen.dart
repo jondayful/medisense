@@ -16,7 +16,7 @@ import '../services/medicine_speech_formatter.dart';
 import '../services/medicine_expiry_parser.dart';
 import '../services/scan_speech_parser.dart';
 import '../services/scan_pipeline.dart';
-import '../services/accessibility_feedback.dart';
+import '../services/scan_haptics.dart';
 import '../services/motion_preferences.dart';
 import '../services/greeting_name.dart';
 import '../models/medication.dart';
@@ -107,6 +107,7 @@ class _MediScanScreenState extends State<MediScanScreen>
   final OcrTextCleanup _ocrCleanup = const OcrTextCleanup();
   final ScanResultStabilityGate _scanResultGate = ScanResultStabilityGate();
   final ScanPreviewEvidence _previewEvidence = ScanPreviewEvidence();
+  final ScanHaptics _scanHaptics = ScanHaptics();
   String? _pendingStrengthConflictName;
   final GlobalKey _previewAreaKey = GlobalKey();
   final GlobalKey _reticleKey = GlobalKey();
@@ -275,6 +276,7 @@ class _MediScanScreenState extends State<MediScanScreen>
     _autoScanTimer?.cancel();
     _initialAutoScanTimer?.cancel();
     _streamFallbackTimer?.cancel();
+    unawaited(_scanHaptics.cancel());
     unawaited(_disposeOcrResources());
     _barcodeScanner.dispose();
     super.dispose();
@@ -617,14 +619,28 @@ class _MediScanScreenState extends State<MediScanScreen>
   }
 
   void _onCameraOcrHint(ScanHint hint) {
-    if (!mounted || _screenDisposing || _cameraSuspended) return;
+    if (!mounted ||
+        _screenDisposing ||
+        _cameraSuspended ||
+        _isScanning ||
+        _scanResult != null ||
+        _isGuidedFlowActive) {
+      return;
+    }
     if (_initialGreetingStarted && !_initialGreetingFinished) return;
     final hapticNow = DateTime.now();
     if (_lastCameraHapticAt == null ||
         hapticNow.difference(_lastCameraHapticAt!) >=
             const Duration(seconds: 3)) {
       _lastCameraHapticAt = hapticNow;
-      unawaited(_vibrateCameraHint(hint));
+      unawaited(
+        _scanHaptics.play(switch (hint) {
+          ScanHint.noTextFound => ScanHapticPattern.noText,
+          ScanHint.moveCloser => ScanHapticPattern.closer,
+          ScanHint.moveFurther => ScanHapticPattern.farther,
+          ScanHint.holdSteady => ScanHapticPattern.steady,
+        }),
+      );
     }
     final appState = context.read<AppStateProvider>();
     if (!appState.voiceNavigationEnabled ||
@@ -656,23 +672,6 @@ class _MediScanScreenState extends State<MediScanScreen>
           debugPrint('MediScan: camera framing speech failed: $error');
         })
         .whenComplete(() => _cameraHintActive = false);
-  }
-
-  /// One pulse means closer, two mean farther, and a firm pulse means hold.
-  /// The spoken cue names the action; the distinct pattern is supplemental.
-  Future<void> _vibrateCameraHint(ScanHint hint) async {
-    switch (hint) {
-      case ScanHint.noTextFound:
-        await HapticFeedback.selectionClick();
-      case ScanHint.moveCloser:
-        await HapticFeedback.lightImpact();
-      case ScanHint.moveFurther:
-        await HapticFeedback.lightImpact();
-        await Future<void>.delayed(const Duration(milliseconds: 170));
-        if (mounted && !_screenDisposing) await HapticFeedback.lightImpact();
-      case ScanHint.holdSteady:
-        await HapticFeedback.mediumImpact();
-    }
   }
 
   Future<void> _speakCameraHint(ScanHint hint, int generation) async {
@@ -1173,6 +1172,7 @@ class _MediScanScreenState extends State<MediScanScreen>
           _statusMessage =
               'I found ${prescriptionCandidates.length} medicines. We will review each one.';
         });
+        unawaited(_scanHaptics.play(ScanHapticPattern.detected));
         await cleanupCapture();
         resumeVoice();
         if (coordinatedScan.freeQuotaExceeded) await _speakQuotaReached();
@@ -1188,7 +1188,7 @@ class _MediScanScreenState extends State<MediScanScreen>
               : 'The label is unclear. Adjust the camera and try again.';
         });
         resumeVoice();
-        if (!automatic) AccessibilityFeedback.error();
+        if (!automatic) _scanWarning();
         if (coordinatedScan.freeQuotaExceeded) {
           await _speakQuotaReached();
         } else {
@@ -1233,6 +1233,7 @@ class _MediScanScreenState extends State<MediScanScreen>
             ? 'Possible label. Please confirm the details.'
             : 'Medicine label detected';
       });
+      unawaited(_scanHaptics.play(ScanHapticPattern.detected));
       await cleanupCapture();
       resumeVoice();
       if (coordinatedScan.freeQuotaExceeded) await _speakQuotaReached();
@@ -1241,7 +1242,7 @@ class _MediScanScreenState extends State<MediScanScreen>
       debugPrint('MediScan: label capture failed: $error\n$stackTrace');
       if (automatic) _scanResultGate.accept(null);
       if (!mounted) return;
-      if (!automatic) AccessibilityFeedback.error();
+      if (!automatic) _scanWarning();
       setState(() {
         _isScanning = false;
         _statusMessage = 'Scan failed. Hold steady and try again.';
@@ -1292,13 +1293,18 @@ class _MediScanScreenState extends State<MediScanScreen>
   /// already contains the medicine.  Only an exact name-and-strength match is
   /// allowed to say "matches"; this code does not make a clinical decision or
   /// tell the person to take a medicine.
+  void _scanWarning() {
+    SystemSound.play(SystemSoundType.alert);
+    unawaited(_scanHaptics.play(ScanHapticPattern.warning));
+  }
+
   Future<void> _checkAgainstPlanOrContinue(MedicineLabelResult result) async {
     final tts = context.read<TtsProvider>();
     // Every scan path reaches this point, including an exact saved-plan match.
     // Expiration must be checked before any reassuring match response.
     final expiry = _expiryInfo(result);
     if (expiry?.isExpired == true) {
-      AccessibilityFeedback.error();
+      _scanWarning();
       await _showExpiredMedicineWarning(expiry!, tts);
       return;
     }
@@ -1306,7 +1312,7 @@ class _MediScanScreenState extends State<MediScanScreen>
     // must never silently validate a medicine, but the elder gets a simple,
     // accessible confirmation question instead of a technical error.
     if (result.confidence < 0.75 || result.nameConfidence < 0.75) {
-      AccessibilityFeedback.error();
+      _scanWarning();
       if (mounted) {
         setState(() => _statusMessage = 'Please confirm what I found.');
       }
@@ -1362,7 +1368,7 @@ class _MediScanScreenState extends State<MediScanScreen>
         await _showAlreadyScheduled(medication);
         return;
       case PrescriptionScanVerdict.strengthMismatch:
-        AccessibilityFeedback.error();
+        _scanWarning();
         final name = _spokenMedicineName(result);
         await _speakIfVoiceNavigationEnabled(
           tts,
@@ -1378,7 +1384,7 @@ class _MediScanScreenState extends State<MediScanScreen>
         return;
       case PrescriptionScanVerdict.outsideScheduledTime:
       case PrescriptionScanVerdict.alreadyRecorded:
-        AccessibilityFeedback.error();
+        _scanWarning();
         final times = medication!.schedule
             .map((schedule) => schedule.formattedTime)
             .join(', ');
