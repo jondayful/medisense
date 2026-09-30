@@ -4,6 +4,8 @@ import 'dart:ui';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 
 import '../models/dosage.dart';
+import '../data/database_helper.dart';
+import 'ocr_text_cleanup.dart';
 import 'ph_drug_catalog.dart';
 import 'prescription_safety.dart';
 
@@ -87,6 +89,7 @@ class MedicineLabelResult {
   final bool strengthNeedsReview;
   final bool nameConflict;
   final String? alternativeName;
+  final List<String> activeIngredients;
 
   const MedicineLabelResult({
     required this.name,
@@ -102,7 +105,25 @@ class MedicineLabelResult {
     this.strengthNeedsReview = false,
     this.nameConflict = false,
     this.alternativeName,
+    this.activeIngredients = const [],
   });
+
+  MedicineLabelResult withRawText(String value) => MedicineLabelResult(
+    name: name,
+    dosage: dosage,
+    confidence: confidence,
+    nameConfidence: nameConfidence,
+    dosageConfidence: dosageConfidence,
+    rawText: value,
+    kind: kind,
+    source: source,
+    barcode: barcode,
+    strengthConflict: strengthConflict,
+    strengthNeedsReview: strengthNeedsReview,
+    nameConflict: nameConflict,
+    alternativeName: alternativeName,
+    activeIngredients: activeIngredients,
+  );
 
   /// High-confidence labels confirm directly; medium ones ask the user to
   /// double-check the details. Low-confidence results never reach here — the
@@ -111,13 +132,18 @@ class MedicineLabelResult {
   bool get isMediumConfidence => confidence < 0.75;
 
   bool get requiresDosageInput =>
-      strengthConflict || strengthNeedsReview || dosage.trim().isEmpty;
+      strengthConflict ||
+      strengthNeedsReview ||
+      activeIngredients.length > 1 ||
+      dosage.trim().isEmpty;
 
   bool get requiresNameReview => nameConflict;
 
   String get dosagePrompt => requiresDosageInput
       ? strengthConflict
             ? 'Scans disagree on the strength. Check the label and enter the amount and unit.'
+            : activeIngredients.length > 1
+            ? 'This medicine has multiple active strengths. Review the label and enter the administered dose.'
             : strengthNeedsReview
             ? 'The strength reading looks unusual. Check the label and enter the amount and unit.'
             : 'Strength not visible. Enter the amount in mg, g, mcg, or mL.'
@@ -126,6 +152,7 @@ class MedicineLabelResult {
   /// The label carries a strength expression like "100 mg / 5 mL" — which
   /// part is the real per-dose amount is ambiguous, so the user should pick.
   bool get doseNeedsChoice {
+    if (activeIngredients.length > 1) return false;
     final parsed = Dosage.parse(dosage);
     return parsed?.hasStrength == true && parsed?.secondValue != null;
   }
@@ -137,6 +164,156 @@ class MedicineLabelParser {
     r'\b\d+(?:[.,]\d+)?\s*(?:mg|ml|g|mcg)\b',
     caseSensitive: false,
   );
+
+  /// Keeps each printed ingredient separate. A conjunction is treated as an
+  /// ingredient separator only when both sides contain a plausible name.
+  List<String> splitCombinationIngredients(String text) {
+    final parts = text
+        .split(RegExp(r'\s*(?:\+|&|\band\b)\s*', caseSensitive: false))
+        .map((part) => part.trim())
+        .where((part) => RegExp(r'^[A-Za-z][A-Za-z ]{3,}$').hasMatch(part))
+        .toList();
+    return parts.length >= 2 ? parts : const [];
+  }
+
+  /// Resolve a package against local rows after OCR. The SQL search returns
+  /// possible rows; only an exact observed name or a long cut suffix is used.
+  /// A catalog strength never fills an unreadable printed strength.
+  Future<MedicineLabelResult?> resolveCatalogPackage(
+    String rawText,
+    MedicineLabelResult? parsed, {
+    Future<List<Map<String, Object?>>> Function(String)? lookup,
+  }) async {
+    final cleaned = const OcrTextCleanup().clean(rawText).text;
+    final lines = cleaned.split(RegExp(r'[\r\n]+'));
+    final queries = <String>[];
+    void addQuery(String value) {
+      final query = value
+          .replaceAll(_dosagePattern, ' ')
+          .replaceAll(RegExp(r'[^A-Za-z+& ]'), ' ')
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .replaceAll(RegExp(r'[+&\s]+$'), '')
+          .trim();
+      if (query.length < 5 ||
+          queries.any(
+            (existing) => existing.toLowerCase() == query.toLowerCase(),
+          )) {
+        return;
+      }
+      queries.add(query);
+    }
+
+    // A parsed medicine name is usually the strongest single lookup hint.
+    // A few nearby text lines can add a printed brand/generic pair, but
+    // querying every OCR line made one scan issue up to two dozen serial SQL
+    // searches, including boilerplate from the package.
+    if (parsed != null) addQuery(parsed.name);
+    for (final line in lines.take(12)) {
+      if (queries.length >= 4) break;
+      addQuery(line);
+    }
+
+    final observed = <String>[];
+    final normalizedInnAliases = <String>{};
+    final rows = <Map<String, Object?>>[];
+    for (final query in queries) {
+      observed.add(query.toLowerCase());
+      final lookupKey = const OcrTextCleanup().normalizeInnForLookup(query);
+      Future<List<Map<String, Object?>>> find(String key) => lookup != null
+          ? lookup(key)
+          : DatabaseHelper().findMedicines(key, limit: 8);
+      var found = await find(query);
+      if (found.isEmpty && lookupKey != query) {
+        found = await find(lookupKey);
+        if (found.isNotEmpty) {
+          observed.add(lookupKey.toLowerCase());
+          normalizedInnAliases.add(lookupKey.toLowerCase());
+        }
+      }
+      rows.addAll(found);
+    }
+    if (rows.isEmpty) return parsed?.withRawText(rawText);
+    final unique = <int, Map<String, Object?>>{
+      for (final row in rows)
+        if (row['id'] is int) row['id'] as int: row,
+    };
+    bool visible(String value) {
+      final candidate = value
+          .toLowerCase()
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .trim();
+      if (candidate.isEmpty) return false;
+      return observed.any(
+        (query) =>
+            query == candidate ||
+            (!normalizedInnAliases.contains(query) &&
+                query.length >= 6 &&
+                candidate.contains(query)),
+      );
+    }
+
+    final matching = unique.values
+        .where(
+          (row) =>
+              visible(row['brand_name']?.toString() ?? '') ||
+              visible(row['generic_name']?.toString() ?? ''),
+        )
+        .toList();
+    if (matching.isEmpty) return parsed?.withRawText(rawText);
+    matching.sort((a, b) {
+      int rank(Map<String, Object?> row) =>
+          (visible(row['brand_name']?.toString() ?? '') ? 2 : 0) +
+          (visible(row['generic_name']?.toString() ?? '') ? 1 : 0);
+      return rank(b).compareTo(rank(a));
+    });
+    final row = matching.first;
+    final brand = row['brand_name']?.toString().trim() ?? '';
+    final generic = row['generic_name']?.toString().trim() ?? '';
+    final brandSeen = visible(brand);
+    final exactSeen =
+        observed.contains(brand.toLowerCase()) ||
+        observed.contains(generic.toLowerCase());
+    final name = brandSeen
+        ? brand
+        : generic.isNotEmpty
+        ? generic
+        : brand;
+    final printedStrengths = _dosagePattern
+        .allMatches(cleaned)
+        .map((match) => _normalizeDosage(match.group(0)!))
+        .toSet()
+        .toList();
+    final ingredients = splitCombinationIngredients(generic);
+    final ambiguousStrengths =
+        ingredients.length <= 1 && printedStrengths.length > 1;
+    final strength = ambiguousStrengths
+        ? ''
+        : ingredients.length > 1 && printedStrengths.length == 2
+        ? printedStrengths.join(' + ')
+        : printedStrengths.isNotEmpty
+        ? printedStrengths.first
+        : parsed?.dosage ?? '';
+    return MedicineLabelResult(
+      name: name,
+      dosage: strength,
+      confidence: exactSeen
+          ? (parsed?.confidence ?? 0.76).clamp(0.0, 0.92)
+          : (parsed?.confidence ?? 0.70).clamp(0.0, 0.72),
+      nameConfidence: exactSeen ? 0.95 : 0.72,
+      dosageConfidence: strength.isEmpty
+          ? 0
+          : (parsed?.dosageConfidence ?? 0.85),
+      rawText: rawText,
+      kind: MedicineLabelKind.medicine,
+      source: ScanSource.localMatch,
+      strengthConflict:
+          ambiguousStrengths || (parsed?.strengthConflict ?? false),
+      strengthNeedsReview: parsed?.strengthNeedsReview ?? false,
+      activeIngredients: ingredients.isEmpty && generic.isNotEmpty
+          ? [generic]
+          : ingredients,
+    );
+  }
 
   /// Reconciles two independent OCR reads. Catalog evidence outranks visual
   /// confidence; a close disagreement remains visible for clinical review.
@@ -567,6 +744,24 @@ class MedicineLabelParser {
   /// A live preview may see only the beginning of a medicine name. A prefix
   /// is useful for framing, but never supplies a final name or strength.
   String? previewMedicineName(String text) {
+    final catalog = PhDrugCatalog.instance;
+    if (catalog.isLoaded) {
+      final lines = text
+          .split(RegExp(r'[\r\n]+'))
+          .take(12)
+          .where((line) => line.length <= 100)
+          .toList(growable: false);
+      for (final line in lines) {
+        final match = catalog.findBest(line, allowFuzzy: false);
+        if (match?.exact == true) return match!.canonicalName;
+      }
+      for (final line in lines) {
+        final match = catalog.findTentativeGeneric(line);
+        if (match != null) return match.canonicalName;
+      }
+      final spanning = catalog.findTentativeGeneric(text);
+      if (spanning != null) return spanning.canonicalName;
+    }
     final tokens = RegExp(
       r'[A-Za-z]{4,}',
     ).allMatches(text).map((match) => match.group(0)!.toLowerCase());
@@ -1128,8 +1323,10 @@ class MedicineLabelParser {
 
     final fullText = lines.join('\n');
     final normalizedFullText = fullText.toLowerCase();
-    final catalogMatch = PhDrugCatalog.instance.findBest(fullText);
-    final classification = classify(fullText);
+    final catalogMatch = PhDrugCatalog.instance.findBest(
+      const OcrTextCleanup().clean(fullText).text,
+    );
+    final classification = classify(rawText);
     if (classification.kind != MedicineLabelKind.medicine) return null;
     final nonMedScore = _nonMedicineScore(normalizedFullText);
     if (nonMedScore > 0.25) return null;
@@ -1284,6 +1481,8 @@ class MedicineLabelParser {
   /// several pockets. Conflicting printed strengths require manual review.
   MedicineLabelResult? parsePackage(String rawText) {
     final result = parse(rawText);
+    final catalogResult = _exactCatalogPackage(rawText, result);
+    if (catalogResult != null) return catalogResult;
     final items = _dedupePrescriptionItems(parsePrescriptionItems(rawText));
     if (items.isEmpty) return result;
     final identities = items
@@ -1329,6 +1528,50 @@ class MedicineLabelParser {
     );
   }
 
+  /// Package identity comes from a printed catalog name. Strength is still
+  /// taken only from OCR; several distinct strengths need a manual choice.
+  MedicineLabelResult? _exactCatalogPackage(
+    String rawText,
+    MedicineLabelResult? parsed,
+  ) {
+    if (classify(rawText).kind != MedicineLabelKind.medicine ||
+        _nonMedicineScore(_normalizedWords(rawText)) > 0.25) {
+      return null;
+    }
+    final cleaned = const OcrTextCleanup().clean(rawText).text;
+    final catalog = PhDrugCatalog.instance;
+    final match = catalog.findBest(cleaned, allowFuzzy: false);
+    if (match == null || !match.exact) return null;
+    final identities = <String>{};
+    for (final line in cleaned.split(RegExp(r'[\r\n]+')).take(12)) {
+      final lineMatch = catalog.findBest(line, allowFuzzy: false);
+      if (lineMatch?.exact != true) continue;
+      identities.add(lineMatch!.product.genericName.toLowerCase().trim());
+    }
+    if (identities.length > 1) return null;
+    final ingredients = splitCombinationIngredients(match.product.genericName);
+    final strengths = _dosagePattern
+        .allMatches(cleaned)
+        .map((item) => _normalizeDosage(item.group(0)!))
+        .toSet();
+    final ambiguous = strengths.length > 1;
+    return MedicineLabelResult(
+      name: match.canonicalName,
+      dosage: strengths.length == 1 ? strengths.single : '',
+      confidence: ambiguous ? 0.72 : 0.78,
+      nameConfidence: match.confidence.clamp(0.0, 0.95),
+      dosageConfidence: strengths.length == 1 ? 0.85 : 0,
+      rawText: rawText,
+      source: ScanSource.localMatch,
+      strengthConflict: ambiguous || (parsed?.strengthConflict ?? false),
+      strengthNeedsReview: parsed?.strengthNeedsReview ?? false,
+      activeIngredients:
+          ingredients.isEmpty && match.product.genericName.isNotEmpty
+          ? [match.product.genericName]
+          : ingredients,
+    );
+  }
+
   ParsedMedicine? parsePackageStructured(String rawText) {
     final result = parsePackage(rawText);
     return result == null ? null : _toParsedMedicine(result);
@@ -1352,16 +1595,30 @@ class MedicineLabelParser {
       );
     }
     final items = _dedupePrescriptionItems(parsePrescriptionItems(rawText));
+    // A medicine carton often prints "Rx" beside its name and "capsule" or
+    // "tablet" beside its strength. Neither is evidence of a prescription
+    // page, so single-row detection requires an actual prescription heading.
     final hasHeader = RegExp(
-      r'\b(?:prescription|medication\s+order|patient|prescriber|physician|doctor|pharmacy|rx\s*(?:no|number)?|refills?|directions|sig)\b',
+      r'\b(?:prescription|medication\s+order|patient|prescriber|physician|doctor|pharmacy|refills?|directions?|sig)\b|\brx\s*(?:no\.?|number|#)(?:\s*[:#]?\s*\d+)?(?=\s|:|$)',
       caseSensitive: false,
     ).hasMatch(rawText);
     final hasDirections = RegExp(
-      r'\b(?:take|give|use|apply|inhale|inject|swallow|chew|tablet|capsule|qd|od|bid|bd|tid|tds|qid|prn|every\s+\d+\s*(?:hours?|days?))\b',
+      r'\b(?:take|give|use|apply|inhale|inject|swallow|chew|by\s+mouth|orally|topical|qd|od|bid|bd|tid|tds|qid|prn|once\s+(?:a|per)\s+day|twice\s+(?:a|per)\s+day|three\s+times\s+(?:a|per)\s+day|every\s+\d+\s*(?:hours?|days?))\b',
       caseSensitive: false,
     ).hasMatch(rawText);
     final distinctNames = items
-        .map((item) => _medicineIdentity(item.drugName))
+        .map((item) {
+          final catalogMatch = PhDrugCatalog.instance.findBest(
+            item.drugName,
+            allowFuzzy: false,
+          );
+          final genericName = catalogMatch?.exact == true
+              ? catalogMatch!.product.genericName
+              : '';
+          return _medicineIdentity(
+            genericName.isEmpty ? item.drugName : genericName,
+          );
+        })
         .toSet()
         .length;
     final multipleRows = distinctNames >= 2;
@@ -1920,6 +2177,13 @@ class MedicineLabelParser {
     return value
         .replaceAll(',', '.')
         .replaceAll(RegExp(r'\s+'), ' ')
+        .replaceAllMapped(
+          RegExp(
+            r'\b(\d+(?:\.\d+)?)\s*(mcg|mg|g|ml)\s*/\s*(\d+(?:\.\d+)?)\s*(mcg|mg|g|ml)\b',
+            caseSensitive: false,
+          ),
+          (match) => '${match[1]} ${match[2]} / ${match[3]} ${match[4]}',
+        )
         .replaceAllMapped(
           RegExp(r'\b(ml|iu)\b', caseSensitive: false),
           (match) => match.group(0)!.toLowerCase() == 'ml' ? 'mL' : 'IU',

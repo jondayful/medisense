@@ -106,6 +106,7 @@ class _MediScanScreenState extends State<MediScanScreen>
   final ImagePreprocessor _imagePreprocessor = ImagePreprocessor();
   final OcrTextCleanup _ocrCleanup = const OcrTextCleanup();
   final ScanResultStabilityGate _scanResultGate = ScanResultStabilityGate();
+  final ScanRollingAccumulator _rollingScan = ScanRollingAccumulator();
   final ScanPreviewEvidence _previewEvidence = ScanPreviewEvidence();
   final ScanHaptics _scanHaptics = ScanHaptics();
   String? _pendingStrengthConflictName;
@@ -266,6 +267,7 @@ class _MediScanScreenState extends State<MediScanScreen>
     _autoScanTimer?.cancel();
     _initialAutoScanTimer?.cancel();
     _streamFallbackTimer?.cancel();
+    _rollingScan.reset();
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       _cameraSuspended = true;
@@ -276,6 +278,7 @@ class _MediScanScreenState extends State<MediScanScreen>
   @override
   void dispose() {
     _screenDisposing = true;
+    _rollingScan.reset();
     if (!_voiceStartupReady.isCompleted) _voiceStartupReady.complete();
     _observedAuth?.removeListener(_maybeGreet);
     WidgetsBinding.instance.removeObserver(this);
@@ -384,11 +387,12 @@ class _MediScanScreenState extends State<MediScanScreen>
       _cameraOcrStream = CameraOcrStreamService(
         camera: opening,
         textRecognizer: _textRecognizer,
-        previewMedicineName: _labelParser.previewMedicineName,
+        previewMedicineName: _previewMedicineName,
         onHint: _onCameraOcrHint,
         onCapture: _onCameraOcrCapture,
         onError: _onCameraOcrError,
         onText: (text) {
+          if (!mounted || _screenDisposing) return;
           // Repeated ML Kit frames are independent observations. Cache their
           // parsing, then count each frame toward a stable preview read.
           if (text.text != _lastPreviewOcrText ||
@@ -402,26 +406,42 @@ class _MediScanScreenState extends State<MediScanScreen>
             );
             _lastPreviewLayoutText = layoutText;
             _lastPreviewDetection = detection;
-            _lastPreviewNameHint = detection.items.isEmpty
-                ? _labelParser.previewMedicineName(layoutText)
-                : null;
+            _lastPreviewNameHint = detection.isPrescription
+                ? null
+                : _previewMedicineName(layoutText);
           }
           final detection = _lastPreviewDetection!;
           if (!detection.isPrescription) {
+            _rollingScan.observe(
+              // Never attach a loose parser guess to rolling strength
+              // evidence. Only exact catalog reads or a medicine-contextual
+              // preview hint may corroborate a later still image.
+              name: _lastPreviewNameHint,
+              text: _lastPreviewLayoutText,
+            );
             _previewEvidence.observe(detection.items);
-            if (detection.items.isEmpty) {
-              _previewEvidence.observeStrengthHint(_lastPreviewLayoutText!);
-              final nameHint = _lastPreviewNameHint;
-              if (nameHint != null) {
-                _previewEvidence.observeNameHint(nameHint);
-              }
+            _previewEvidence.observeStrengthHint(_lastPreviewLayoutText!);
+            final nameHint = _lastPreviewNameHint;
+            if (nameHint != null) {
+              _previewEvidence.observeNameHint(nameHint);
             }
             if (!_isScanning && _scanResult == null) {
-              final previewStatus = detection.items.length == 1
+              final itemNameIsExact =
+                  detection.items.length == 1 &&
+                  PhDrugCatalog.instance
+                          .findBest(
+                            detection.items.single.drugName,
+                            allowFuzzy: false,
+                          )
+                          ?.exact ==
+                      true;
+              final previewStatus = _lastPreviewNameHint != null
+                  ? 'Possible ${_lastPreviewNameHint!}. Reading strength...'
+                  : detection.items.length == 1 && itemNameIsExact
                   ? 'Reading ${detection.items.single.drugName} '
                         '${detection.items.single.strength}. Confirming...'
-                  : _lastPreviewNameHint != null
-                  ? 'Possible ${_lastPreviewNameHint!}. Reading strength...'
+                  : detection.items.length == 1
+                  ? 'Medicine text spotted. Hold the label steady...'
                   : RegExp(
                       r'\b\d+(?:[.,]\d+)?\s*(?:mcg|mg|ml|g|iu)\b',
                       caseSensitive: false,
@@ -792,6 +812,7 @@ class _MediScanScreenState extends State<MediScanScreen>
   }
 
   void _onCameraOcrError(Object error, StackTrace stack) {
+    if (!mounted || _screenDisposing) return;
     debugPrint('MediScan: camera OCR frame failed: $error');
     final stream = _cameraOcrStream;
     if (stream != null &&
@@ -945,6 +966,34 @@ class _MediScanScreenState extends State<MediScanScreen>
     );
   }
 
+  /// Tentative name fragments are helpful only when the same frame carries
+  /// medicine context. Otherwise background print, foil texture, or a partial
+  /// pill imprint can look like a drug name and trigger a misleading preview.
+  String? _previewMedicineName(String text) {
+    final name = _labelParser.previewMedicineName(text);
+    if (name == null) return null;
+    final exactCatalogName =
+        PhDrugCatalog.instance.findBest(text, allowFuzzy: false)?.exact == true;
+    final firstNameWord = name.toLowerCase().split(RegExp(r'[^a-z]+')).first;
+    final minimumPrefix = firstNameWord.substring(
+      0,
+      firstNameWord.length < 6 ? firstNameWord.length : 6,
+    );
+    final nameEvidence =
+        minimumPrefix.length >= 6 &&
+        RegExp(r'[A-Za-z]{6,}')
+            .allMatches(text)
+            .any(
+              (match) =>
+                  match.group(0)!.toLowerCase().startsWith(minimumPrefix),
+            );
+    final medicineContext = RegExp(
+      r'\b\d+(?:[.,]\d+)?\s*(?:mcg|mg|ml|g|iu|units?)\b|\b(?:tablets?|tabs?|capsules?|caps?|syrup|suspension|drops?|ointment|cream|injection)\b',
+      caseSensitive: false,
+    ).hasMatch(text);
+    return exactCatalogName || (nameEvidence && medicineContext) ? name : null;
+  }
+
   Future<void> _captureAndReadLabel({
     bool automatic = false,
     XFile? capturedImage,
@@ -1017,6 +1066,7 @@ class _MediScanScreenState extends State<MediScanScreen>
     if (!automatic) {
       _manualCapturePending = false;
       _scanResultGate.reset();
+      _rollingScan.reset();
       _waitForManualScanAfterBatch = false;
       HapticFeedback.heavyImpact();
       SystemSound.play(SystemSoundType.click);
@@ -1109,12 +1159,15 @@ class _MediScanScreenState extends State<MediScanScreen>
       }
       final ocrPath = preparedPath!;
       if (mounted) setState(() => _statusMessage = 'Reading label');
-      var localScan = await _ocrCoordinator.processPrescriptionImage(
-        imagePath: ocrPath,
-        userId: scanUserId,
-        userTier: scanUserTier,
-        allowCloudFallback: false,
-        labelFirst: !likelyPrescription,
+      var localScan = await _imagePreprocessor.withNativeReader(
+        ocrPath,
+        () => _ocrCoordinator.processPrescriptionImage(
+          imagePath: ocrPath,
+          userId: scanUserId,
+          userTier: scanUserTier,
+          allowCloudFallback: false,
+          labelFirst: !likelyPrescription,
+        ),
       );
       if (!mounted || _screenDisposing) return;
       recordPackageText(localScan.rawText);
@@ -1128,12 +1181,15 @@ class _MediScanScreenState extends State<MediScanScreen>
         enhancedPath = await _imagePreprocessor.getEnhancedImage(ocrPath);
         final retryPath = enhancedPath;
         if (retryPath != null) {
-          final enhancedScan = await _ocrCoordinator.processPrescriptionImage(
-            imagePath: retryPath,
-            userId: scanUserId,
-            userTier: scanUserTier,
-            allowCloudFallback: false,
-            labelFirst: !likelyPrescription,
+          final enhancedScan = await _imagePreprocessor.withNativeReader(
+            retryPath,
+            () => _ocrCoordinator.processPrescriptionImage(
+              imagePath: retryPath,
+              userId: scanUserId,
+              userTier: scanUserTier,
+              allowCloudFallback: false,
+              labelFirst: !likelyPrescription,
+            ),
           );
           recordPackageText(enhancedScan.rawText);
           if (enhancedScan.isComplete ||
@@ -1197,12 +1253,15 @@ class _MediScanScreenState extends State<MediScanScreen>
       // after ML Kit and only happen when the local result is unclear.
       final coordinatedScan = localScan.isComplete || automatic
           ? localScan
-          : await _ocrCoordinator.processPrescriptionImage(
-              imagePath: localOcrPath,
-              userId: scanUserId,
-              userTier: scanUserTier,
-              labelFirst: !likelyPrescription,
-              localResult: localScan,
+          : await _imagePreprocessor.withNativeReader(
+              localOcrPath,
+              () => _ocrCoordinator.processPrescriptionImage(
+                imagePath: localOcrPath,
+                userId: scanUserId,
+                userTier: scanUserTier,
+                labelFirst: !likelyPrescription,
+                localResult: localScan,
+              ),
             );
       if (!mounted || _screenDisposing) return;
       recordPackageText(coordinatedScan.rawText);
@@ -1285,6 +1344,13 @@ class _MediScanScreenState extends State<MediScanScreen>
         await _reviewMultiplePrescriptionMedicines(prescriptionCandidates);
         return;
       }
+      if (!reviewAsPrescription) {
+        result = await _labelParser.resolveCatalogPackage(
+          coordinatedScan.rawText,
+          result,
+        );
+        if (!mounted || _screenDisposing) return;
+      }
       if (result == null) {
         if (automatic) _scanResultGate.accept(null);
         setState(() {
@@ -1303,6 +1369,10 @@ class _MediScanScreenState extends State<MediScanScreen>
         return;
       }
 
+      if (automatic && !reviewAsPrescription) {
+        result = _rollingScan.merge(result);
+      }
+
       var observedConflict = false;
       if (!reviewAsPrescription) {
         final resultName = result.name.toLowerCase().trim();
@@ -1319,6 +1389,15 @@ class _MediScanScreenState extends State<MediScanScreen>
         }
       }
 
+      final exactStillName = PhDrugCatalog.instance.findBest(
+        coordinatedScan.rawText,
+        allowFuzzy: false,
+      );
+      final provisionalNameConfirmed =
+          exactStillName?.exact == true &&
+          exactStillName!.canonicalName.toLowerCase().trim() ==
+              result.name.toLowerCase().trim() &&
+          previewEvidence?.supportsTentativeNameAndStrength(result) == true;
       final previewConfirmed =
           automatic &&
           result.confidence >= 0.70 &&
@@ -1327,7 +1406,8 @@ class _MediScanScreenState extends State<MediScanScreen>
           !result.nameConflict &&
           !result.strengthConflict &&
           !observedConflict &&
-          previewEvidence?.supports(result) == true;
+          (previewEvidence?.supports(result) == true ||
+              provisionalNameConfirmed);
       if (automatic && !previewConfirmed && !_scanResultGate.accept(result)) {
         setState(() {
           _isScanning = false;
@@ -1713,6 +1793,7 @@ class _MediScanScreenState extends State<MediScanScreen>
         strengthConflict: true,
         nameConflict: result.nameConflict,
         alternativeName: result.alternativeName,
+        activeIngredients: result.activeIngredients,
       );
 
   String _spokenMedicineName(MedicineLabelResult result) =>
@@ -3315,6 +3396,22 @@ class _MedicineConfirmationSheet extends StatelessWidget {
                                     : AppTheme.inkText,
                               ),
                             ),
+                            if (result.activeIngredients.isNotEmpty &&
+                                result.activeIngredients
+                                        .join(' + ')
+                                        .toLowerCase() !=
+                                    result.name.toLowerCase()) ...[
+                              const SizedBox(height: 3),
+                              Text(
+                                'Active: ${result.activeIngredients.join(' + ')}',
+                                style: AppTheme.textStyle(
+                                  fontSize: 13,
+                                  color: isDark
+                                      ? AppTheme.darkTextSecondary
+                                      : AppTheme.mutedText,
+                                ),
+                              ),
+                            ],
                             const SizedBox(height: 3),
                             Text(
                               result.dosage.isEmpty

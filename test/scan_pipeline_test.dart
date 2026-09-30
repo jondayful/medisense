@@ -1,12 +1,75 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 import 'package:medisense/services/medicine_label_parser.dart';
+import 'package:medisense/services/medicine_expiry_parser.dart';
 import 'package:medisense/services/ocr_capture_stability_gate.dart';
+import 'package:medisense/services/ph_drug_catalog.dart';
 import 'package:medisense/services/scan_pipeline.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  test(
+    'broken OCR name stays provisional until an exact package read',
+    () async {
+      await PhDrugCatalog.instance.ensureLoaded();
+      final catalog = PhDrugCatalog.instance;
+      expect(
+        catalog.findTentativeGeneric('Para mol ta')?.canonicalName,
+        'Paracetamol',
+      );
+      expect(catalog.findTentativeGeneric('Para mol ta')?.exact, isFalse);
+      expect(catalog.findTentativeGeneric('caps mineral'), isNull);
+
+      final parser = MedicineLabelParser();
+      expect(parser.previewMedicineName('Para mol ta\n500 mg'), 'Paracetamol');
+      final still = parser.parsePackage('Paracetamol\n500 mg\nEXP 12/2028');
+      expect(still?.name, 'Paracetamol');
+      expect(still?.dosage, '500 mg');
+
+      final withOriginalText = await parser.resolveCatalogPackage(
+        'Paracetamol\n500 mg\nEXP 12/2028',
+        parser.parsePackage('Paracetamol\n500 mg'),
+        lookup: (_) async => [],
+      );
+      expect(MedicineExpiryParser.parse(withOriginalText!.rawText), isNotNull);
+
+      final preview = ScanPreviewEvidence();
+      preview.observeNameHint('Paracetamol');
+      preview.observeNameHint('Paracetamol');
+      preview.observeStrengthHint('500 mg');
+      preview.observeStrengthHint('500 mg');
+      expect(preview.supportsTentativeNameAndStrength(still!), isTrue);
+      final weakPreview = ScanPreviewEvidence();
+      weakPreview.observeNameHint('Paracetamol');
+      weakPreview.observeNameHint('Paracetamol');
+      weakPreview.observeStrengthHint('500 mg');
+      expect(weakPreview.supportsTentativeNameAndStrength(still), isFalse);
+    },
+  );
+
+  test(
+    'catalog name wins over corrupted package text and mixed strengths',
+    () async {
+      await PhDrugCatalog.instance.ensureLoaded();
+      final parser = MedicineLabelParser();
+      final label = parser.parsePackage(
+        'Analmin\nMefenamicmic Acid Ci\n500 mg\nLOT 9182\nEXP 12/2028',
+      );
+      expect(label?.name.toLowerCase(), contains('analmin'));
+      expect(label?.dosage, '500 mg');
+      expect(label?.activeIngredients, contains('Mefenamic Acid'));
+      final ambiguous = parser.parsePackage(
+        'Paracetamol\n500 mg\n250 mg\nEXP 12/2028',
+      );
+      expect(ambiguous?.name, 'Paracetamol');
+      expect(ambiguous?.dosage, isEmpty);
+      expect(ambiguous?.strengthConflict, isTrue);
+    },
+  );
+
   test(
     'preview recognizes a unique medicine prefix without guessing dosage',
     () {
@@ -157,7 +220,57 @@ void main() {
     expect(gate.accept(paracetamol), isFalse);
   });
 
-  test('a name-only first still can pair with a complete second still', () {
+  test('canonical gate ignores OCR unit spacing and packaging noise', () {
+    final gate = ScanResultStabilityGate();
+    const first = MedicineLabelResult(
+      name: 'MYREFEN',
+      dosage: 'S00 Meg',
+      confidence: .8,
+      nameConfidence: .8,
+      dosageConfidence: .8,
+      rawText: 'MYREFEN S00 Meg NSAID',
+    );
+    const second = MedicineLabelResult(
+      name: 'Myrefen',
+      dosage: '500 mog',
+      confidence: .8,
+      nameConfidence: .8,
+      dosageConfidence: .8,
+      rawText: 'MYREFEN 500 mog BN: V780',
+    );
+    expect(gate.accept(first), isFalse);
+    expect(gate.accept(second), isTrue);
+  });
+
+  test('rolling accumulator expires and rejects conflicting strengths', () {
+    const result = MedicineLabelResult(
+      name: 'Myrefen',
+      dosage: '',
+      confidence: .7,
+      nameConfidence: .8,
+      dosageConfidence: 0,
+      rawText: 'Myrefen',
+    );
+    final at = DateTime(2026, 1, 1);
+    final rolling = ScanRollingAccumulator();
+    rolling.observe(text: '500 mg', at: at);
+    expect(
+      rolling.merge(result, at: at.add(const Duration(seconds: 1))).dosage,
+      '500mg',
+    );
+    expect(
+      rolling.merge(result, at: at.add(const Duration(seconds: 3))).dosage,
+      isEmpty,
+    );
+    rolling.observe(text: '500 mg', at: at.add(const Duration(seconds: 4)));
+    rolling.observe(text: '250 mg', at: at.add(const Duration(seconds: 5)));
+    expect(
+      rolling.merge(result, at: at.add(const Duration(seconds: 5))).dosage,
+      isEmpty,
+    );
+  });
+
+  test('a name-only still needs two complete canonical reads', () {
     final gate = ScanResultStabilityGate();
     const partial = MedicineLabelResult(
       name: 'Mefenamic Acid',
@@ -176,6 +289,7 @@ void main() {
       rawText: 'Mefenamic Acid 500 mg',
     );
     expect(gate.accept(partial), isFalse);
+    expect(gate.accept(complete), isFalse);
     expect(gate.accept(complete), isTrue);
     gate.reset();
     expect(gate.accept(partial), isFalse);
@@ -401,6 +515,31 @@ void main() {
       expect(File(prepared).existsSync(), isFalse);
       expect(File(fullPage).existsSync(), isFalse);
       expect(File(enhanced!).existsSync(), isFalse);
+    } finally {
+      await processor.dispose();
+      await directory.delete(recursive: true);
+    }
+  });
+
+  test('derived file survives until native reader future settles', () async {
+    final directory = await Directory.systemTemp.createTemp('medisense_lease_');
+    final source = File('${directory.path}/capture.jpg');
+    await source.writeAsBytes(img.encodeJpg(img.Image(100, 100)));
+    final processor = ImagePreprocessor();
+    try {
+      final prepared = (await processor.prepareForOcr(source.path))!;
+      final nativeDone = Completer<void>();
+      final reading = processor.withNativeReader(
+        prepared,
+        () => nativeDone.future,
+      );
+      final deleting = processor.releaseGenerated(prepared);
+      await Future<void>.delayed(Duration.zero);
+      expect(File(prepared).existsSync(), isTrue);
+      nativeDone.complete();
+      await reading;
+      await deleting;
+      expect(File(prepared).existsSync(), isFalse);
     } finally {
       await processor.dispose();
       await directory.delete(recursive: true);

@@ -104,6 +104,7 @@ class PhDrugCatalog {
   List<PhDrugProduct> _products = const [];
   Map<String, List<_AliasRecord>> _aliases = {};
   Map<String, List<_AliasRecord>> _prefixes = {};
+  Map<String, Set<String>> _genericPrefixes = {};
   static const _genericSalts = {
     'hydrochloride',
     'hcl',
@@ -158,6 +159,7 @@ class PhDrugCatalog {
       _products = index._products;
       _aliases = index._aliases;
       _prefixes = index._prefixes;
+      _genericPrefixes = index._genericPrefixes;
       _loaded = true;
     } catch (_) {
       // A missing/corrupt catalog must never block ML Kit OCR or manual entry.
@@ -176,6 +178,14 @@ class PhDrugCatalog {
           existing.isBrand == record.isBrand,
     )) {
       records.add(record);
+    }
+
+    // Index simple generic names for provisional reads of split or doubled
+    // OCR words. A fragment can suggest a name, but cannot verify a product.
+    if (!record.isBrand && RegExp(r'^[a-z]+(?: [a-z]+)?$').hasMatch(alias)) {
+      _genericPrefixes
+          .putIfAbsent(alias.substring(0, 4), () => <String>{})
+          .add(alias);
     }
 
     // Fuzzy matching is intentionally restricted to one-word aliases. This
@@ -200,7 +210,7 @@ class PhDrugCatalog {
     return null;
   }
 
-  PhDrugCatalogMatch? findBest(String text) {
+  PhDrugCatalogMatch? findBest(String text, {bool allowFuzzy = true}) {
     if (!_loaded) return null;
     final normalized = _normalize(text);
     if (normalized.isEmpty) return null;
@@ -239,7 +249,7 @@ class PhDrugCatalog {
       }
     }
 
-    if (matches.isEmpty) {
+    if (matches.isEmpty && allowFuzzy) {
       _addConservativeFuzzyMatches(words, matches);
     }
     if (matches.isEmpty) return null;
@@ -250,6 +260,60 @@ class PhDrugCatalog {
       return b.matchedAlias.length.compareTo(a.matchedAlias.length);
     });
     return matches.first;
+  }
+
+  /// A unique, provisional generic from broken words such as "Para mol ta"
+  /// or "Mefenamicmic Acid". The caller must get a later exact OCR read.
+  PhDrugCatalogMatch? findTentativeGeneric(String text) {
+    if (!_loaded) return null;
+    final words = RegExp(r'[a-z]+')
+        .allMatches(text.toLowerCase())
+        .map((match) => match.group(0)!)
+        .toList(growable: false);
+    if (words.length < 2) return null;
+    final matches = <String>{};
+    for (var i = 0; i < words.length - 1; i++) {
+      final first = words[i];
+      if (first.length < 4) continue;
+      final aliases = _genericPrefixes[first.substring(0, 4)];
+      if (aliases == null) continue;
+      for (final alias in aliases) {
+        final parts = alias.split(' ');
+        final base = parts.first;
+        var common = 0;
+        while (common < first.length &&
+            common < base.length &&
+            first.codeUnitAt(common) == base.codeUnitAt(common)) {
+          common++;
+        }
+        final second = words[i + 1];
+        final secondWordMatches =
+            parts.length == 2 &&
+            common >= 6 &&
+            second.length >= 3 &&
+            (parts[1].startsWith(second) || second.startsWith(parts[1]));
+        final splitWordMatches =
+            parts.length == 1 &&
+            first == base.substring(0, common) &&
+            common >= 4 &&
+            second.length >= 3 &&
+            base.indexOf(second, common) >= common;
+        if (secondWordMatches || splitWordMatches) matches.add(alias);
+      }
+    }
+    if (matches.length != 1) return null;
+    final alias = matches.single;
+    final record = _aliases[alias]
+        ?.where((record) => !record.isBrand)
+        .firstOrNull;
+    if (record == null) return null;
+    return PhDrugCatalogMatch(
+      product: record.product,
+      confidence: 0.62,
+      matchedAlias: alias,
+      matchedBrand: false,
+      exact: false,
+    );
   }
 
   void _addConservativeFuzzyMatches(

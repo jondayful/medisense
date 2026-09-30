@@ -10,12 +10,15 @@ import '../services/password_hasher.dart' as hasher;
 
 class DatabaseHelper {
   static final DatabaseHelper _instance = DatabaseHelper._internal();
-  static Database? _database;
+  Database? _database;
   static Future<void>? _catalogImport;
 
   factory DatabaseHelper() => _instance;
 
   DatabaseHelper._internal();
+
+  /// Isolates catalog import tests from the app's singleton database.
+  DatabaseHelper.forTesting(Database database) : _database = database;
 
   Future<Database> get database async {
     if (_database != null) return _database!;
@@ -29,7 +32,7 @@ class DatabaseHelper {
 
     return await openDatabase(
       path,
-      version: 11,
+      version: 12,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       onConfigure: _onConfigure,
@@ -280,6 +283,7 @@ class DatabaseHelper {
         }
       }
     }
+    if (oldVersion < 12) await _seedGlobalMedicineAliases(db);
   }
 
   Future<void> _createMedicineCatalog(Database db) async {
@@ -312,6 +316,15 @@ class DatabaseHelper {
       ('', 'Dorzolamide', 'generic', '', 'dorzolamidum'),
       ('', 'Cimetidine', 'generic', '50 mg', 'cimetidine'),
       ('Oxprelol', 'Oxprenolol', 'tablet', '50 mg', 'oxprelol'),
+      ('Myrefen', 'Mefenamic Acid', 'tablet', '500 mg', ''),
+      (
+        'Hivent Plus',
+        'Ipratropium Bromide + Salbutamol',
+        'nebule',
+        '500 mcg + 2.5 mg / 2.5 mL',
+        'ipratropium bromide and salbutamol',
+      ),
+      ('Amlytrol', 'Amlodipine', 'tablet', '', ''),
     ];
     for (final row in rows) {
       await db.rawInsert(
@@ -329,64 +342,82 @@ class DatabaseHelper {
   }
 
   /// Import one or more bundled regional catalogs in one transaction.
-  /// Every catalog uses chunked batch commits, so the same fast path applies
-  /// to future Philippine, WHO, or other regional CSV files.
+  /// Asset loading gives us bytes; CSV rows are decoded incrementally instead
+  /// of materializing another full string and a list of every parsed row.
   Future<int> importMedicineCatalog(List<String> assetPaths) async {
     final db = await database;
     var imported = 0;
     await db.transaction((txn) async {
       for (final assetPath in assetPaths) {
-        final content = await rootBundle.loadString(assetPath);
-        final rows = _parseCsv(content);
-        if (rows.isEmpty) continue;
-        final headers = rows.first.map(_csvHeader).toList();
-        final indexes = <String, int>{};
-        for (var i = 0; i < headers.length; i++) {
-          indexes[headers[i]] = i;
-        }
-        var batch = txn.batch();
-        var batchCount = 0;
-        for (final values in rows.skip(1)) {
-          String value(List<String> names) {
-            for (final name in names) {
-              final index = indexes[name];
-              if (index != null &&
-                  index < values.length &&
-                  values[index].trim().isNotEmpty) {
-                return values[index].trim();
-              }
-            }
-            return '';
+        final bytes = (await rootBundle.load(assetPath)).buffer.asUint8List();
+        final chunks = () async* {
+          for (var offset = 0; offset < bytes.length; offset += 64 * 1024) {
+            yield bytes.sublist(
+              offset,
+              math.min(offset + 64 * 1024, bytes.length),
+            );
           }
-
-          final brand = value(['brand_name', 'brand', 'trade_name']);
-          final generic = value(['generic_name', 'generic', 'inn']);
-          if (brand.isEmpty && generic.isEmpty) continue;
-          final countryValue = value(['country_code', 'country', 'region']);
-          final aliases = value(['aliases', 'alias', 'synonyms']);
-          batch.insert('medicines', {
-            'brand_name': brand,
-            'generic_name': generic,
-            'dosage_form': value(['dosage_form', 'form']),
-            'strength': value(['strength', 'dosage', 'dosage_strength']),
-            'aliases': aliases,
-            'country_code': (countryValue.isEmpty ? 'GLOBAL' : countryValue)
-                .toUpperCase(),
-          });
-          imported++;
-          batchCount++;
-          if (batchCount == 500) {
-            await batch.commit(noResult: true);
-            batch = txn.batch();
-            batchCount = 0;
-            // Yield between chunks so large regional catalogs do not monopolize
-            // the isolate that owns the database call site.
-            await Future<void>.delayed(Duration.zero);
-          }
-        }
-        if (batchCount > 0) await batch.commit(noResult: true);
+        }();
+        imported += await _importCsv(txn, chunks);
       }
     });
+    return imported;
+  }
+
+  /// Imports a file/network stream without holding its complete CSV in memory.
+  Future<int> importMedicineCatalogStream(Stream<List<int>> bytes) async {
+    final db = await database;
+    return db.transaction((txn) => _importCsv(txn, bytes));
+  }
+
+  Future<int> _importCsv(Transaction txn, Stream<List<int>> bytes) async {
+    var imported = 0;
+    Map<String, int>? indexes;
+    var batch = txn.batch();
+    var batchCount = 0;
+    await for (final values in _parseCsvRows(utf8.decoder.bind(bytes))) {
+      if (indexes == null) {
+        indexes = {
+          for (var i = 0; i < values.length; i++) _csvHeader(values[i]): i,
+        };
+        continue;
+      }
+      String value(List<String> names) {
+        for (final name in names) {
+          final index = indexes![name];
+          if (index != null &&
+              index < values.length &&
+              values[index].trim().isNotEmpty) {
+            return values[index].trim();
+          }
+        }
+        return '';
+      }
+
+      final brand = value(['brand_name', 'brand', 'trade_name']);
+      final generic = value(['generic_name', 'generic', 'inn']);
+      if (brand.isEmpty && generic.isEmpty) continue;
+      final countryValue = value(['country_code', 'country', 'region']);
+      final aliases = value(['aliases', 'alias', 'synonyms']);
+      batch.insert('medicines', {
+        'brand_name': brand,
+        'generic_name': generic,
+        'dosage_form': value(['dosage_form', 'form']),
+        'strength': value(['strength', 'dosage', 'dosage_strength']),
+        'aliases': aliases,
+        'country_code': (countryValue.isEmpty ? 'GLOBAL' : countryValue)
+            .toUpperCase(),
+      });
+      imported++;
+      batchCount++;
+      if (batchCount == 500) {
+        await batch.commit(noResult: true);
+        batch = txn.batch();
+        batchCount = 0;
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
+    if (batchCount > 0) await batch.commit(noResult: true);
     return imported;
   }
 
@@ -398,7 +429,9 @@ class DatabaseHelper {
       final db = await database;
       final count =
           Sqflite.firstIntValue(
-            await db.rawQuery('SELECT COUNT(*) FROM medicines'),
+            await db.rawQuery(
+              "SELECT COUNT(*) FROM medicines WHERE country_code = 'US'",
+            ),
           ) ??
           0;
       if (count > 0) return;
@@ -412,60 +445,75 @@ class DatabaseHelper {
     int limit = 20,
   }) async {
     final db = await database;
-    // Prefix lookups use the catalog indexes and avoid returning unrelated
-    // medicines whose names merely contain the OCR token in the middle.
-    final pattern = '${token.trim()}%';
+    final query = token.trim();
+    if (query.isEmpty) return const [];
+    final prefix = '${_escapeLike(query)}%';
     final country = countryCode?.trim().toUpperCase();
     final scoped = country != null && country.isNotEmpty;
-    return db.query(
-      'medicines',
-      where: scoped
-          ? '(brand_name LIKE ? OR generic_name LIKE ? OR aliases LIKE ?) AND country_code = ?'
-          : 'brand_name LIKE ? OR generic_name LIKE ? OR aliases LIKE ?',
-      whereArgs: scoped
-          ? [pattern, pattern, pattern, country]
-          : [pattern, pattern, pattern],
-      orderBy: 'brand_name ASC, generic_name ASC',
-      limit: limit,
+    Future<List<Map<String, Object?>>> search(String pattern) => db.rawQuery(
+      'SELECT * FROM medicines WHERE '
+      '(brand_name LIKE ? ESCAPE \'\\\' OR generic_name LIKE ? ESCAPE \'\\\' '
+      'OR aliases LIKE ? ESCAPE \'\\\')'
+      '${scoped ? " AND country_code IN (?, 'GLOBAL')" : ''} '
+      'ORDER BY CASE WHEN brand_name = ? OR generic_name = ? THEN 0 ELSE 1 END, '
+      'brand_name ASC, generic_name ASC LIMIT ?',
+      [pattern, pattern, pattern, if (scoped) country, query, query, limit],
     );
+    final leading = await search(prefix);
+    if (leading.isNotEmpty || query.length < 6) return leading;
+    return search('%${_escapeLike(query)}%');
   }
 
-  List<List<String>> _parseCsv(String input) {
-    final output = <List<String>>[];
+  String _escapeLike(String value) => value
+      .replaceAll('\\', '\\\\')
+      .replaceAll('%', '\\%')
+      .replaceAll('_', '\\_');
+
+  Stream<List<String>> _parseCsvRows(Stream<String> chunks) async* {
     final row = <String>[];
     final field = StringBuffer();
     var quoted = false;
+    var quotePending = false;
+    var previousCr = false;
     void endField() {
       row.add(field.toString());
       field.clear();
     }
 
-    void endRow() {
-      endField();
-      if (row.any((v) => v.trim().isNotEmpty)) output.add(List.of(row));
-      row.clear();
-    }
-
-    for (var i = 0; i < input.length; i++) {
-      final char = input[i];
-      if (char == '"') {
-        if (quoted && i + 1 < input.length && input[i + 1] == '"') {
-          field.write('"');
-          i++;
-        } else {
-          quoted = !quoted;
+    await for (final chunk in chunks) {
+      for (final char in chunk.split('')) {
+        if (previousCr) {
+          previousCr = false;
+          if (char == '\n') continue;
         }
-      } else if (char == ',' && !quoted) {
-        endField();
-      } else if ((char == '\n' || char == '\r') && !quoted) {
-        if (char == '\r' && i + 1 < input.length && input[i + 1] == '\n') i++;
-        endRow();
-      } else {
-        field.write(char);
+        if (quotePending) {
+          quotePending = false;
+          if (char == '"') {
+            field.write('"');
+            continue;
+          }
+          quoted = false;
+        }
+        if (char == '"' && quoted) {
+          quotePending = true;
+        } else if (char == '"' && field.isEmpty) {
+          quoted = true;
+        } else if (char == ',' && !quoted) {
+          endField();
+        } else if ((char == '\n' || char == '\r') && !quoted) {
+          endField();
+          if (row.any((v) => v.trim().isNotEmpty)) yield List.of(row);
+          row.clear();
+          previousCr = char == '\r';
+        } else {
+          field.write(char);
+        }
       }
     }
-    if (field.isNotEmpty || row.isNotEmpty) endRow();
-    return output;
+    if (field.isNotEmpty || row.isNotEmpty) {
+      endField();
+      if (row.any((v) => v.trim().isNotEmpty)) yield List.of(row);
+    }
   }
 
   String _csvHeader(String value) => value
@@ -931,6 +979,23 @@ class DatabaseHelper {
       [userId],
     );
     return (rows.single['total'] as int?) ?? 0;
+  }
+
+  /// Medication IDs with an upload or delete still waiting, including retries.
+  Future<Set<String>> queuedMedicationSyncIds(String userId) async {
+    final db = await database;
+    final rows = await db.query(
+      'sync_outbox',
+      columns: ['id'],
+      where: "user_id = ? AND operation IN ('medication', 'deleteMedication')",
+      whereArgs: [userId],
+    );
+    final prefix = 'medication:$userId:';
+    return {
+      for (final row in rows)
+        if ((row['id'] as String).startsWith(prefix))
+          (row['id'] as String).substring(prefix.length),
+    };
   }
 
   Future<int?> nextSyncRetryAt(String userId) async {

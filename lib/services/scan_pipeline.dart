@@ -7,6 +7,8 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'medicine_label_parser.dart';
+import 'ocr_text_cleanup.dart';
+import 'ph_drug_catalog.dart';
 
 /// A small, device-local medicine catalog entry. The catalog is deliberately
 /// data-driven so it can later be populated from a bundled JSON/SQLite file
@@ -134,6 +136,8 @@ class BarcodeScanService {
 class ImagePreprocessor {
   final Map<String, Future<String?>> _pending = {};
   final Set<String> _generatedPaths = {};
+  final Map<String, int> _activeReaders = {};
+  final Map<String, Completer<void>> _readersIdle = {};
   Isolate? _worker;
   ReceivePort? _responses;
   SendPort? _requests;
@@ -160,6 +164,25 @@ class ImagePreprocessor {
 
   Future<String?> enhanceForOcr(String sourcePath) =>
       getEnhancedImage(sourcePath);
+
+  /// A derived file stays on disk until the platform channel has returned.
+  /// This also protects disposal and error paths that release images early.
+  Future<T> withNativeReader<T>(String path, Future<T> Function() read) async {
+    if (_disposed) throw StateError('Image preprocessor is disposed.');
+    _activeReaders[path] = (_activeReaders[path] ?? 0) + 1;
+    _readersIdle.putIfAbsent(path, () => Completer<void>());
+    try {
+      return await read();
+    } finally {
+      final remaining = _activeReaders[path]! - 1;
+      if (remaining == 0) {
+        _activeReaders.remove(path);
+        _readersIdle.remove(path)?.complete();
+      } else {
+        _activeReaders[path] = remaining;
+      }
+    }
+  }
 
   Future<String?> _process(
     String path, {
@@ -238,15 +261,13 @@ class ImagePreprocessor {
     for (final key in keys) {
       final generated = await _pending.remove(key);
       if (generated == null) continue;
-      _generatedPaths.remove(generated);
-      try {
-        await File(generated).delete();
-      } catch (_) {}
+      await releaseGenerated(generated);
     }
   }
 
   /// Deletes one derived image only after its native OCR future has completed.
   Future<void> releaseGenerated(String generatedPath) async {
+    await _readersIdle[generatedPath]?.future;
     final matchingJobs = <String>[];
     for (final entry in _pending.entries) {
       if (await entry.value == generatedPath) matchingJobs.add(entry.key);
@@ -266,6 +287,7 @@ class ImagePreprocessor {
   Future<void> dispose() async {
     _disposed = true;
     await Future.wait(_pending.values);
+    await Future.wait(_readersIdle.values.map((idle) => idle.future));
     _worker?.kill(priority: Isolate.immediate);
     _responses?.close();
     await Future.wait(
@@ -496,7 +518,8 @@ class ScanFrameGate {
 /// scan opens confirmation. OCR noise outside the parsed name and strength
 /// does not reset the candidate.
 class ScanResultStabilityGate {
-  String? _candidate;
+  CanonicalMedicine? _candidate;
+  String? _batchCandidate;
   int _consecutiveReads = 0;
 
   bool accept(MedicineLabelResult? result) {
@@ -504,25 +527,10 @@ class ScanResultStabilityGate {
       reset();
       return false;
     }
-    final key = '${result.name}|${result.dosage}'
-        .toLowerCase()
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
-    if (key != _candidate) {
-      final previous = _candidate;
-      final separator = previous?.indexOf('|') ?? -1;
-      // A first still may reveal only the name. A second independent still
-      // that reads the same name plus a printed strength completes the pair.
-      if (separator >= 0 &&
-          previous!.substring(0, separator) ==
-              key.substring(0, key.indexOf('|')) &&
-          previous.substring(separator + 1).isEmpty &&
-          result.dosage.trim().isNotEmpty) {
-        _candidate = key;
-        _consecutiveReads++;
-        return _consecutiveReads >= 2;
-      }
+    final key = CanonicalMedicine.fromResult(result);
+    if (_candidate == null || !_candidate!.matches(key)) {
       _candidate = key;
+      _batchCandidate = null;
       _consecutiveReads = 1;
       return false;
     }
@@ -534,23 +542,20 @@ class ScanResultStabilityGate {
   /// Sorting makes harmless OCR row-order changes stable while retaining each
   /// medicine's name and strength as part of the safety key.
   bool acceptBatch(Iterable<MedicineLabelResult> results) {
-    final keys =
-        results
-            .map(
-              (result) => '${result.name}|${result.dosage}'
-                  .toLowerCase()
-                  .replaceAll(RegExp(r'\s+'), ' ')
-                  .trim(),
-            )
-            .toList()
-          ..sort();
-    if (keys.length < 2 || keys.any((key) => key == '|')) {
+    final keys = results.map(CanonicalMedicine.fromResult).toList();
+    if (keys.length < 2 || keys.any((key) => key.canonicalName.isEmpty)) {
       reset();
       return false;
     }
-    final key = keys.join('||');
-    if (key != _candidate) {
-      _candidate = key;
+    final key =
+        keys
+            .map((item) => '${item.canonicalName}|${item.normalizedStrength}')
+            .toList()
+          ..sort();
+    final batchKey = key.join('||');
+    if (batchKey != _batchCandidate) {
+      _batchCandidate = batchKey;
+      _candidate = null;
       _consecutiveReads = 1;
       return false;
     }
@@ -560,7 +565,112 @@ class ScanResultStabilityGate {
 
   void reset() {
     _candidate = null;
+    _batchCandidate = null;
     _consecutiveReads = 0;
+  }
+}
+
+class CanonicalMedicine {
+  const CanonicalMedicine({
+    required this.canonicalName,
+    required this.normalizedStrength,
+  });
+
+  final String canonicalName;
+  final String normalizedStrength;
+
+  factory CanonicalMedicine.fromResult(MedicineLabelResult result) {
+    final cleaned = const OcrTextCleanup().clean(result.name).text.trim();
+    final exact = PhDrugCatalog.instance.findExactAlias(cleaned);
+    final name = exact?.product.genericName.isNotEmpty == true
+        ? exact!.product.genericName
+        : cleaned;
+    final strength = const OcrTextCleanup()
+        .clean(result.dosage)
+        .text
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s+'), '')
+        .replaceAll(',', '.');
+    return CanonicalMedicine(
+      canonicalName: name.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim(),
+      normalizedStrength: strength,
+    );
+  }
+
+  bool matches(CanonicalMedicine other) =>
+      canonicalName == other.canonicalName &&
+      normalizedStrength == other.normalizedStrength;
+}
+
+/// Carries one unambiguous strength across nearby preview frames. A new drug
+/// or a conflicting strength clears the evidence instead of inventing a dose.
+class ScanRollingAccumulator {
+  ScanRollingAccumulator({this.ttl = const Duration(milliseconds: 2500)});
+
+  final Duration ttl;
+  String? _name;
+  String? _strength;
+  DateTime? _lastAt;
+  bool _conflict = false;
+
+  void observe({String? name, String? text, DateTime? at}) {
+    final now = at ?? DateTime.now();
+    if (_lastAt == null || now.difference(_lastAt!) > ttl) reset();
+    _lastAt = now;
+    final normalizedName = name?.toLowerCase().trim();
+    if (normalizedName != null && normalizedName.isNotEmpty) {
+      if (_name != null && _name != normalizedName) reset();
+      _name = normalizedName;
+      _lastAt = now;
+    }
+    final matches = RegExp(
+      r'\b\d+(?:[.,]\d+)?\s*(?:mcg|mg|ml|g)\b',
+      caseSensitive: false,
+    ).allMatches(const OcrTextCleanup().clean(text ?? '').text).toList();
+    if (matches.length == 1) {
+      final strength = matches.single
+          .group(0)!
+          .toLowerCase()
+          .replaceAll(RegExp(r'\s+'), '');
+      if (_strength != null && _strength != strength) _conflict = true;
+      _strength = strength;
+    } else if (matches.length > 1) {
+      _conflict = true;
+    }
+  }
+
+  MedicineLabelResult merge(MedicineLabelResult result, {DateTime? at}) {
+    if (_lastAt == null ||
+        (at ?? DateTime.now()).difference(_lastAt!) > ttl ||
+        _conflict ||
+        _strength == null ||
+        result.dosage.isNotEmpty ||
+        (_name != null && _name != result.name.toLowerCase().trim())) {
+      return result;
+    }
+    return MedicineLabelResult(
+      name: result.name,
+      dosage: _strength!,
+      confidence: result.confidence.clamp(0.0, 0.72),
+      nameConfidence: result.nameConfidence,
+      dosageConfidence: 0.72,
+      rawText: result.rawText,
+      kind: result.kind,
+      source: result.source,
+      barcode: result.barcode,
+      strengthConflict: result.strengthConflict,
+      strengthNeedsReview: result.strengthNeedsReview,
+      nameConflict: result.nameConflict,
+      alternativeName: result.alternativeName,
+      activeIngredients: result.activeIngredients,
+    );
+  }
+
+  void reset() {
+    _name = null;
+    _strength = null;
+    _lastAt = null;
+    _conflict = false;
   }
 }
 
@@ -683,6 +793,25 @@ class ScanPreviewEvidence {
                     _nameHints.every((hint) => hint == name)) ||
                 (_strengthHints.contains(strength) &&
                     _strengthHints.every((hint) => hint == strength))));
+  }
+
+  /// Repeated provisional preview names can corroborate an exact name and
+  /// strength from the still image. The caller must verify the still name.
+  bool supportsTentativeNameAndStrength(MedicineLabelResult result) {
+    if (conflictsWith(result)) return false;
+    final name = result.name
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    final strength = result.dosage
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s+'), '')
+        .replaceAll(',', '.');
+    if (name.isEmpty || strength.isEmpty) return false;
+    return _nameHints.length >= 2 &&
+        _nameHints.every((hint) => hint == name) &&
+        _strengthHints.length >= 2 &&
+        _strengthHints.every((hint) => hint == strength);
   }
 }
 

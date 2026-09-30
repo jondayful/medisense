@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import '../data/database_helper.dart';
+import '../providers/medication_provider.dart';
+import '../services/supabase_service.dart';
+import '../services/supabase_sync_service.dart';
 import '../theme/app_theme.dart';
 
-/// Shows only an operation count. Medication details stay in the local outbox.
+/// Shows connection and medicine counts without exposing medication details.
 class SyncStatusTile extends StatefulWidget {
   const SyncStatusTile({
     super.key,
@@ -32,6 +36,8 @@ class SyncStatusTile extends StatefulWidget {
 
 class _SyncStatusTileState extends State<SyncStatusTile> {
   late Future<int> _count;
+  bool _refreshing = false;
+  bool _refreshFailed = false;
 
   @override
   void initState() {
@@ -47,14 +53,42 @@ class _SyncStatusTileState extends State<SyncStatusTile> {
     }
   }
 
-  void _refresh() {
+  String? get _connectionProblem {
+    if (!SupabaseService.isConfigured) {
+      return 'Cloud sync is unavailable in this app build. Medicines stay on this device.';
+    }
+    if (SupabaseSyncService.nullableUuid(widget.userId) == null ||
+        SupabaseService.client.auth.currentUser?.id != widget.userId) {
+      return 'This account has no active cloud session. Sign out and sign in again to restore saved medicines.';
+    }
+    return null;
+  }
+
+  Future<void> _refresh() async {
+    if (_refreshing) return;
     setState(() {
-      _count = DatabaseHelper().queuedSyncOperationCount(widget.userId);
+      _refreshing = true;
+      _refreshFailed = false;
     });
+    try {
+      if (_connectionProblem == null) {
+        await context.read<MedicationProvider>().syncNow();
+      }
+    } catch (_) {
+      _refreshFailed = true;
+    } finally {
+      if (mounted) {
+        setState(() {
+          _count = DatabaseHelper().queuedSyncOperationCount(widget.userId);
+          _refreshing = false;
+        });
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final medications = context.watch<MedicationProvider>();
     return ListTile(
       contentPadding: widget.contentPadding,
       leading: Icon(
@@ -63,7 +97,7 @@ class _SyncStatusTileState extends State<SyncStatusTile> {
         size: widget.iconSize,
       ),
       title: Text(
-        'Cloud sync queue',
+        'Cloud sync',
         style: AppTheme.textStyle(
           fontSize: widget.titleSize,
           fontWeight: FontWeight.w700,
@@ -73,15 +107,24 @@ class _SyncStatusTileState extends State<SyncStatusTile> {
       subtitle: FutureBuilder<int>(
         future: _count,
         builder: (context, snapshot) {
-          final message = switch (snapshot.connectionState) {
-            ConnectionState.waiting => 'Checking queued changes…',
-            _ when snapshot.hasError =>
-              'Queue status unavailable on this device.',
-            _ when (snapshot.data ?? 0) == 0 =>
-              'No changes waiting on this device. This does not confirm delivery to another device.',
-            _ =>
-              '${snapshot.data} change${snapshot.data == 1 ? '' : 's'} waiting. The app retries when signed in and connected; delivery time is not guaranteed.',
-          };
+          final message =
+              _connectionProblem ??
+              (_refreshFailed || medications.syncFailed
+                  ? 'Cloud sync could not finish. Check your connection and try again.'
+                  : null) ??
+              switch (snapshot.connectionState) {
+                ConnectionState.waiting => 'Checking queued changes…',
+                _ when snapshot.hasError =>
+                  'Queue status unavailable on this device.',
+                _
+                    when (snapshot.data ?? 0) == 0 &&
+                        medications.cloudMedicationCount != null =>
+                  '${medications.cloudMedicationCount} medicine${medications.cloudMedicationCount == 1 ? '' : 's'} found in cloud; ${medications.medications.length} on this device.',
+                _ when (snapshot.data ?? 0) == 0 =>
+                  'No changes waiting. Tap refresh to check for saved cloud medicines.',
+                _ =>
+                  '${snapshot.data} change${snapshot.data == 1 ? '' : 's'} waiting. The app retries when signed in and connected; delivery time is not guaranteed.',
+              };
           return Text(
             message,
             style: AppTheme.textStyle(
@@ -93,9 +136,15 @@ class _SyncStatusTileState extends State<SyncStatusTile> {
         },
       ),
       trailing: IconButton(
-        onPressed: _refresh,
-        icon: const Icon(Icons.refresh_rounded),
-        tooltip: 'Refresh sync queue status',
+        onPressed: _refreshing ? null : _refresh,
+        icon: _refreshing
+            ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.refresh_rounded),
+        tooltip: 'Retry medicine cloud sync',
       ),
     );
   }

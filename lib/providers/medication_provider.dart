@@ -55,6 +55,9 @@ class MedicationProvider extends ChangeNotifier with WidgetsBindingObserver {
   bool _drainRequested = false;
   bool _isPatientAccount = false;
   bool _disposed = false;
+  int _loadRequestId = 0;
+  int? _cloudMedicationCount;
+  bool _syncFailed = false;
   static const Duration _cacheTTL = Duration(seconds: 30);
 
   @override
@@ -102,11 +105,13 @@ class MedicationProvider extends ChangeNotifier with WidgetsBindingObserver {
     _isPatientAccount = isPatientAccount ?? _isPatientAccount;
 
     if (_effectiveUserId == oldEffectiveId &&
-        _lastFetchTime != null &&
         _viewingPatient == oldWasViewing &&
         _isPatientAccount == oldWasPatientAccount) {
       return;
     }
+    _loadRequestId++;
+    _cloudMedicationCount = null;
+    _syncFailed = false;
     _snapshotSyncTimer?.cancel();
     _snapshotSyncTimer = null;
     if (_isPatientAccount &&
@@ -139,6 +144,11 @@ class MedicationProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   List<Medication> get medications => List.unmodifiable(_medications);
   bool get isLoading => _isLoading;
+  int? get cloudMedicationCount => _cloudMedicationCount;
+  bool get syncFailed => _syncFailed;
+
+  /// Retries queued changes and downloads medicines for the signed-in patient.
+  Future<void> syncNow() => _drainSyncOutbox();
 
   Future<void> loadMedications({bool forceRefresh = false}) async {
     if (!forceRefresh &&
@@ -149,13 +159,14 @@ class MedicationProvider extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
 
+    final requestId = ++_loadRequestId;
+    final userId = _effectiveUserId;
+
     _isLoading = true;
     notifyListeners();
 
-    final joinedData = await _db.getAllMedicationsWithSchedules(
-      _effectiveUserId,
-    );
-    final allLogs = await _db.getTodayLogsForUser(_effectiveUserId);
+    final joinedData = await _db.getAllMedicationsWithSchedules(userId);
+    final allLogs = await _db.getTodayLogsForUser(userId);
 
     final Map<String, List<Map<String, dynamic>>> medGroups = {};
     for (var row in joinedData) {
@@ -217,6 +228,11 @@ class MedicationProvider extends ChangeNotifier with WidgetsBindingObserver {
       );
     }
 
+    if (_disposed ||
+        requestId != _loadRequestId ||
+        userId != _effectiveUserId) {
+      return;
+    }
     _medications = loadedMeds;
     _isLoading = false;
     _lastFetchTime = DateTime.now();
@@ -733,15 +749,21 @@ class MedicationProvider extends ChangeNotifier with WidgetsBindingObserver {
       _drainRequested = true;
       return active;
     }
-    final drain = _runOutboxDrain();
+    final drain = _drainUntilIdle();
     _activeOutboxDrain = drain;
     return drain.whenComplete(() {
       _activeOutboxDrain = null;
-      if (_drainRequested) {
-        _drainRequested = false;
-        unawaited(_drainSyncOutbox());
-      }
     });
+  }
+
+  Future<void> _drainUntilIdle() async {
+    do {
+      _drainRequested = false;
+      await _runOutboxDrain();
+    } while (_drainRequested &&
+        !_disposed &&
+        !_viewingPatient &&
+        _isPatientAccount);
   }
 
   Future<void> _runOutboxDrain() async {
@@ -751,6 +773,7 @@ class MedicationProvider extends ChangeNotifier with WidgetsBindingObserver {
         SupabaseService.client.auth.currentUser?.id != patientId) {
       return;
     }
+    _syncFailed = false;
     try {
       final operations = await _db.pendingSyncOperations(userId: patientId);
       var failed = false;
@@ -796,6 +819,7 @@ class MedicationProvider extends ChangeNotifier with WidgetsBindingObserver {
             );
           } else {
             failed = true;
+            _syncFailed = true;
             await _db.retrySyncOperation(
               id,
               'Supabase sync unavailable',
@@ -804,6 +828,7 @@ class MedicationProvider extends ChangeNotifier with WidgetsBindingObserver {
           }
         } catch (error) {
           failed = true;
+          _syncFailed = true;
           await _db.retrySyncOperation(
             id,
             error,
@@ -813,18 +838,18 @@ class MedicationProvider extends ChangeNotifier with WidgetsBindingObserver {
       }
       if (_disposed || _userId != patientId || _viewingPatient) return;
       final remaining = await _db.queuedSyncOperationCount(patientId);
-      if (await _db.queuedMedicationSyncOperationCount(patientId) == 0) {
-        await _reconcileMedicationSnapshot(patientId);
-      }
+      await _reconcileMedicationSnapshot(patientId);
       if (!failed && operations.length == 100 && remaining > 0) {
         // The outbox query is bounded. Continue immediately when more ready
         // operations remain, while the retry timer handles failed ones.
         _drainRequested = true;
       }
     } catch (error) {
+      _syncFailed = true;
       debugPrint('Could not drain sync outbox: $error');
     } finally {
       await _scheduleOutboxRetry();
+      if (!_disposed && _userId == patientId) notifyListeners();
     }
   }
 
@@ -840,18 +865,37 @@ class MedicationProvider extends ChangeNotifier with WidgetsBindingObserver {
     final rows = await _db.getAllMedicationsWithSchedules(patientId);
     final local = medicationSnapshotFromRows(rows);
     final cloud = await _sync.fetchPatientMedications(patientId);
-    if (_drainRequested ||
-        _disposed ||
-        _userId != patientId ||
-        await _db.queuedMedicationSyncOperationCount(patientId) != 0) {
+    if (_drainRequested || _disposed || _userId != patientId) {
       return;
     }
-    final plan = planMedicationSync(local, cloud);
-    for (final medication in plan.uploads) {
-      if (_drainRequested ||
-          _userId != patientId ||
-          await _db.queuedMedicationSyncOperationCount(patientId) != 0) {
+    _cloudMedicationCount = cloud.length;
+    final pendingIds = await _db.queuedMedicationSyncIds(patientId);
+    final plan = planMedicationSync(local, cloud, pendingIds: pendingIds);
+    var restored = false;
+    for (final medication in plan.restores) {
+      if (_drainRequested || _disposed || _userId != patientId) {
         return;
+      }
+      if ((await _db.queuedMedicationSyncIds(
+        patientId,
+      )).contains(medication['id'])) {
+        continue;
+      }
+      await _restoreCloudMedication(patientId, medication);
+      restored = true;
+    }
+    if (restored) {
+      invalidateCache();
+      await loadMedications(forceRefresh: true);
+    }
+    for (final medication in plan.uploads) {
+      if (_drainRequested || _disposed || _userId != patientId) {
+        return;
+      }
+      if ((await _db.queuedMedicationSyncIds(
+        patientId,
+      )).contains(medication['id'])) {
+        continue;
       }
       final synced = await _sync.uploadMedication(
         patientId: patientId,
@@ -860,26 +904,60 @@ class MedicationProvider extends ChangeNotifier with WidgetsBindingObserver {
       );
       if (!synced) return;
     }
-    for (final id in plan.deletes) {
-      if (_drainRequested ||
-          _userId != patientId ||
-          await _db.queuedMedicationSyncOperationCount(patientId) != 0) {
-        return;
-      }
-      if (!await _sync.deleteMedication(
-        patientId: patientId,
-        medicationId: id,
-      )) {
-        return;
-      }
-    }
-    if (plan.uploads.isNotEmpty || plan.deletes.isNotEmpty) {
+    if (plan.uploads.isNotEmpty) {
       final verified = await _sync.fetchPatientMedications(patientId);
-      final difference = planMedicationSync(local, verified);
-      if (difference.uploads.isNotEmpty || difference.deletes.isNotEmpty) {
+      if (_disposed || _userId != patientId) return;
+      _cloudMedicationCount = verified.length;
+      final difference = planMedicationSync(
+        local,
+        verified,
+        pendingIds: await _db.queuedMedicationSyncIds(patientId),
+      );
+      if (difference.uploads.isNotEmpty) {
         debugPrint('Medication cloud snapshot still differs from this device.');
       }
     }
+  }
+
+  Future<void> _restoreCloudMedication(
+    String patientId,
+    Map<String, dynamic> med,
+  ) async {
+    final medId = med['id'];
+    if (medId is! String || medId.isEmpty) return;
+    final schedules = <Map<String, dynamic>>[];
+    for (final raw in med['schedules'] as List? ?? const []) {
+      if (raw is! Map || raw['id'] is! String) continue;
+      schedules.add({
+        'id': raw['id'],
+        'medication_id': medId,
+        'label': raw['label'] ?? 'Scheduled',
+        'hour': raw['hour'] ?? 8,
+        'minute': raw['minute'] ?? 0,
+      });
+    }
+    await _db.saveMedicationAndSchedules(
+      {
+        'id': medId,
+        'name': med['name'] ?? '',
+        'dosage': med['dosage'] ?? '',
+        'form': med['form'] ?? 'Tablet',
+        'color_hex': med['color_hex'] ?? 'ff00897b',
+        'expiration_date': _cloudExpirationDate(med),
+        'frequency': med['frequency'],
+        'quantity_dispensed': med['quantity_dispensed'],
+        'units_per_dose': med['units_per_dose'],
+        'prescription_start_date': med['prescription_start_date'],
+        'prescription_reviewed':
+            med['prescription_reviewed'] == true ||
+                med['prescription_reviewed'] == 1
+            ? 1
+            : 0,
+        'user_id': patientId,
+      },
+      schedules,
+      replaceSchedules: true,
+    );
   }
 
   Future<void> _scheduleOutboxRetry() async {

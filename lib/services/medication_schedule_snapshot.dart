@@ -1,6 +1,4 @@
-/// The patient's active SQLite rows are the source for the caregiver's cloud
-/// schedule. Keep this mapping in one place so reconciliation compares exactly
-/// the data that it uploads.
+/// Maps the patient's active SQLite rows to the cloud schedule format.
 List<Map<String, dynamic>> medicationSnapshotFromRows(
   List<Map<String, dynamic>> rows,
 ) {
@@ -46,21 +44,19 @@ List<Map<String, dynamic>> medicationSnapshotFromRows(
 
 class MedicationSyncPlan {
   final List<Map<String, dynamic>> uploads;
-  final List<String> deletes;
+  final List<Map<String, dynamic>> restores;
 
-  const MedicationSyncPlan({required this.uploads, required this.deletes});
+  const MedicationSyncPlan({required this.uploads, required this.restores});
 }
 
 MedicationSyncPlan planMedicationSync(
   List<Map<String, dynamic>> local,
-  List<Map<String, dynamic>> cloud,
-) {
-  // A fresh device can have an empty SQLite database before its cloud history
-  // is restored. Explicit deletion outbox entries still remove medicines that
-  // the patient actually deleted on this device.
-  if (local.isEmpty) {
-    return const MedicationSyncPlan(uploads: [], deletes: []);
-  }
+  List<Map<String, dynamic>> cloud, {
+  Set<String> pendingIds = const {},
+}) {
+  // A device can have only some of the patient's medicines. Missing local
+  // rows must be restored, never interpreted as deletions. Explicit deletion
+  // outbox entries are the only way to remove a cloud medicine.
   final cloudById = <String, Map<String, dynamic>>{
     for (final medication in cloud)
       if (medication['id'] is String) medication['id'] as String: medication,
@@ -70,18 +66,25 @@ MedicationSyncPlan planMedicationSync(
   for (final medication in local) {
     final id = medication['id'] as String;
     localIds.add(id);
-    if (!_sameMedication(medication, cloudById[id])) uploads.add(medication);
+    if (!pendingIds.contains(id) &&
+        !_sameMedication(medication, cloudById[id])) {
+      uploads.add(medication);
+    }
   }
-  final deletes = cloudById.keys
-      .where((id) => !localIds.contains(id))
+  final restores = cloudById.entries
+      .where(
+        (entry) =>
+            !localIds.contains(entry.key) && !pendingIds.contains(entry.key),
+      )
+      .map((entry) => entry.value)
       .toList(growable: false);
-  return MedicationSyncPlan(uploads: uploads, deletes: deletes);
+  return MedicationSyncPlan(uploads: uploads, restores: restores);
 }
 
 bool _sameMedication(Map<String, dynamic> local, Map<String, dynamic>? cloud) {
   if (cloud == null) return false;
   for (final entry in local.entries) {
-    if (entry.key == 'schedules') continue;
+    if (entry.key == 'schedules' || entry.key == 'is_active') continue;
     if (cloud[entry.key] != entry.value) return false;
   }
   final localSchedules = local['schedules'] as List<Map<String, dynamic>>;

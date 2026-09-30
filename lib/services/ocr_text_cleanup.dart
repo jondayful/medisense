@@ -82,6 +82,33 @@ class OcrTextCleanup {
           (match) => '${_numeric(match[1]!)} ${_unit(match[2]!)}',
         );
 
+    text = text
+        .replaceAllMapped(
+          RegExp(
+            r'\b[sS5][oO0]{2}\b(?=\s*(?:mg|mcg|meg|mog|ug|uq)\b)',
+            caseSensitive: false,
+          ),
+          (_) => '500',
+        )
+        .replaceAllMapped(
+          RegExp(
+            r'\b(\d+(?:\.\d+)?)\s*(?:mog|meg|ug|uq)\b',
+            caseSensitive: false,
+          ),
+          (match) => '${match[1]} mcg',
+        )
+        .replaceAllMapped(
+          RegExp(
+            r'\b(\d+(?:\.\d+)?)\s*(mcg|mg|g|ml)\s*/\s*(\d+(?:\.\d+)?)\s*(mcg|mg|g|ml)\b',
+            caseSensitive: false,
+          ),
+          (match) {
+            String unit(String value) =>
+                value.toLowerCase() == 'ml' ? 'mL' : value.toLowerCase();
+            return '${match[1]}${unit(match[2]!)}/${match[3]}${unit(match[4]!)}';
+          },
+        );
+
     final corrections = <OcrCorrection>[];
     text = text.replaceAllMapped(RegExp(r"[A-Za-z][A-Za-z0-9'-]*"), (match) {
       final token = match[0]!;
@@ -102,8 +129,73 @@ class OcrTextCleanup {
       corrections.add(OcrCorrection(token, candidate));
       return _preserveCase(token, candidate);
     });
-    return OcrCleanupResult(text: text, corrections: corrections);
+    return OcrCleanupResult(
+      text: stripPackagingNoise(text),
+      corrections: corrections,
+    );
   }
+
+  /// Removes label boilerplate line by line so a stamp cannot consume the
+  /// medicine on the following line. Strengths and ingredient separators stay.
+  String stripPackagingNoise(String source) {
+    return source
+        .split('\n')
+        .map((line) {
+          var value = line;
+          if (RegExp(
+            r'^\s*(?:batch|lot|bkn|bn|paf|exp|mfg|md|drp[- ]?\d+)\b',
+            caseSensitive: false,
+          ).hasMatch(value)) {
+            return '';
+          }
+          value = value.replaceAll(
+            RegExp(
+              r'\b(?:non[- ]?steroidal(?:\s+anti[- ]?inflammatory)?(?:\s+drug)?|anti[- ]?(?:inflammatory|hflammatory)|[a-z]*[hf]lammatory|ennntary|nsaid|nsad|anti[- ]?fibrinolytic|bronchodilator|anti[- ]?hypertensive|analgesic|antipyretic|anilide|antibiotic|antihistamine)\b',
+              caseSensitive: false,
+            ),
+            ' ',
+          );
+          value = value.replaceAll(
+            RegExp(
+              r'\b(?:(?:solution|solut[io0]n)\s+for\s+(?:inhalation|boalation|nalation)|for\s+inhalation|inhalation\s+solution|oral\s+suspension|solut[io0]n|inhalat[io0]n|boalat[io0]n|nalat[io0]n|suspension|syrup|drops|elixir|ointment|cream)\b',
+              caseSensitive: false,
+            ),
+            ' ',
+          );
+          if (!RegExp(
+            r'^\s*(?:take|give|use|apply|inhale|inject|swallow|chew|\d+\s*(?:tabs?|caps?|tablets?|capsules?|pills?))\b',
+            caseSensitive: false,
+          ).hasMatch(value)) {
+            value = value.replaceAll(
+              RegExp(
+                r'\b(?:capsules?|tablets?|caps?|tabs?|nebules?|ampoules?|vials?|pills?)\b',
+                caseSensitive: false,
+              ),
+              ' ',
+            );
+          }
+          value = value.replaceAll(
+            RegExp(
+              r'\b(?:rx\s+only|batch|lot|bkn|bn|paf|exp|ed|md|mfg|dr\.?\s*xy\d+|rx)\b(?:\s*[:#]?\s*(?:[A-Z]?\d+[A-Z0-9/-]*|\d{2}/\d{4}))?',
+              caseSensitive: false,
+            ),
+            ' ',
+          );
+          value = value.replaceAll(RegExp(r'\b\d{2}/\d{4}\b'), ' ');
+          value = value.replaceFirst(
+            RegExp(r'^\s*reading\b\s*', caseSensitive: false),
+            '',
+          );
+          return value.replaceAll(RegExp(r'[ \t]+'), ' ').trim();
+        })
+        .join('\n');
+  }
+
+  /// Catalog lookup may use a Latin INN spelling; preserve the printed name
+  /// in the OCR result and apply this only to a lookup key.
+  String normalizeInnForLookup(String name) => name
+      .replaceAllMapped(RegExp(r'idum\b', caseSensitive: false), (_) => 'ide')
+      .replaceAllMapped(RegExp(r'um\b', caseSensitive: false), (_) => '');
 
   String? _opticalMedicineCorrection(String token) {
     final lower = token.toLowerCase();

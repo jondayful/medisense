@@ -196,7 +196,10 @@ class SupabaseSyncService {
     required String patientId,
   }) async {
     final currentUser = SupabaseService.client.auth.currentUser;
-    if (currentUser == null || currentUser.id != patientId) {
+    final patientUuid = nullableUuid(patientId);
+    if (currentUser == null ||
+        patientUuid == null ||
+        currentUser.id != patientUuid) {
       throw StateError(
         'Sign in with the patient account to decide this invitation.',
       );
@@ -205,7 +208,7 @@ class SupabaseSyncService {
         .from('pairings')
         .update({'status': status.name})
         .eq('id', pairingId)
-        .eq('patient_id', patientId)
+        .eq('patient_id', patientUuid)
         .eq('status', PairingStatus.pending.name)
         .select('id')
         .maybeSingle()
@@ -222,16 +225,24 @@ class SupabaseSyncService {
   ) async {
     final uuid = nullableUuid(patientId);
     if (uuid == null) return const [];
-    final result = await SupabaseService.client
-        .from('medications')
-        .select('id, data')
-        .eq('patient_id', uuid)
-        .timeout(const Duration(seconds: 10));
-    return result.map((row) {
-      final data = Map<String, dynamic>.from(row['data'] as Map? ?? {});
-      data['id'] ??= row['id'];
-      return data;
-    }).toList();
+    const pageSize = 500;
+    final medications = <Map<String, dynamic>>[];
+    for (var offset = 0; ; offset += pageSize) {
+      final page = await SupabaseService.client
+          .from('medications')
+          .select('id, data')
+          .eq('patient_id', uuid)
+          .order('id')
+          .range(offset, offset + pageSize - 1)
+          .timeout(const Duration(seconds: 10));
+      for (final row in page) {
+        final data = Map<String, dynamic>.from(row['data'] as Map? ?? {});
+        data['id'] = row['id'];
+        medications.add(data);
+      }
+      if (page.length < pageSize) break;
+    }
+    return medications;
   }
 
   Future<List<Map<String, dynamic>>> fetchPatientLogs(String patientId) async {
@@ -266,7 +277,9 @@ class SupabaseSyncService {
     required String scheduleId,
   }) async {
     final patientUuid = nullableUuid(patientId);
-    final guardianUuid = SupabaseService.client.auth.currentUser?.id;
+    final guardianUuid = nullableUuid(
+      SupabaseService.client.auth.currentUser?.id,
+    );
     if (patientUuid == null || guardianUuid == null) {
       throw StateError('Sign in and connect with the patient first.');
     }
@@ -408,7 +421,8 @@ class SupabaseSyncService {
     required UserRole role,
   }) async {
     final currentUser = SupabaseService.client.auth.currentUser;
-    if (currentUser == null || currentUser.id != userId) {
+    final uuid = nullableUuid(userId);
+    if (currentUser == null || uuid == null || currentUser.id != uuid) {
       throw StateError(
         'The active Google account does not match this profile.',
       );
@@ -416,7 +430,7 @@ class SupabaseSyncService {
     await SupabaseService.client
         .from('profiles')
         .upsert({
-          'id': userId,
+          'id': uuid,
           'email': email,
           'name': name,
           'role': role.name,
